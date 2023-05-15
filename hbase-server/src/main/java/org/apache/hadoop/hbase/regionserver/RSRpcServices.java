@@ -348,7 +348,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
   final InetSocketAddress isa;
 
   protected final HRegionServer regionServer;
-  private final long maxScannerResultSize;
+  private volatile long maxScannerResultSize;
 
   // The reference to the priority extraction function
   private final PriorityFunction priority;
@@ -377,12 +377,12 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
   /**
    * Row size threshold for multi requests above which a warning is logged
    */
-  private final int rowSizeWarnThreshold;
+  private volatile int rowSizeWarnThreshold;
   /*
    * Whether we should reject requests with very high no of rows i.e. beyond threshold defined by
    * rowSizeWarnThreshold
    */
-  private final boolean rejectRowsWithSizeOverThreshold;
+  private volatile boolean rejectRowsWithSizeOverThreshold;
 
   final AtomicBoolean clearCompactionQueues = new AtomicBoolean(false);
 
@@ -707,16 +707,20 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
    */
   private Result append(final HRegion region, final OperationQuota quota,
     final MutationProto mutation, final CellScanner cellScanner, long nonceGroup,
-    ActivePolicyEnforcement spaceQuota) throws IOException {
+    ActivePolicyEnforcement spaceQuota, RpcCallContext context) throws IOException {
     long before = EnvironmentEdgeManager.currentTime();
     Append append = ProtobufUtil.toAppend(mutation, cellScanner);
     checkCellSizeLimit(region, append);
     spaceQuota.getPolicyEnforcement(region).check(append);
     quota.addMutation(append);
+    long blockBytesScannedBefore = context != null ? context.getBlockBytesScanned() : 0;
     long nonce = mutation.hasNonce() ? mutation.getNonce() : HConstants.NO_NONCE;
     Result r = region.append(append, nonceGroup, nonce);
     if (regionServer.getMetrics() != null) {
-      regionServer.getMetrics().updateAppend(region, EnvironmentEdgeManager.currentTime() - before);
+      long blockBytesScanned =
+        context != null ? context.getBlockBytesScanned() - blockBytesScannedBefore : 0;
+      regionServer.getMetrics().updateAppend(region, EnvironmentEdgeManager.currentTime() - before,
+        blockBytesScanned);
     }
     return r == null ? Result.EMPTY_RESULT : r;
   }
@@ -726,17 +730,21 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
    */
   private Result increment(final HRegion region, final OperationQuota quota,
     final MutationProto mutation, final CellScanner cells, long nonceGroup,
-    ActivePolicyEnforcement spaceQuota) throws IOException {
+    ActivePolicyEnforcement spaceQuota, RpcCallContext context) throws IOException {
     long before = EnvironmentEdgeManager.currentTime();
     Increment increment = ProtobufUtil.toIncrement(mutation, cells);
     checkCellSizeLimit(region, increment);
     spaceQuota.getPolicyEnforcement(region).check(increment);
     quota.addMutation(increment);
+    long blockBytesScannedBefore = context != null ? context.getBlockBytesScanned() : 0;
     long nonce = mutation.hasNonce() ? mutation.getNonce() : HConstants.NO_NONCE;
     Result r = region.increment(increment, nonceGroup, nonce);
     final MetricsRegionServer metricsRegionServer = regionServer.getMetrics();
     if (metricsRegionServer != null) {
-      metricsRegionServer.updateIncrement(region, EnvironmentEdgeManager.currentTime() - before);
+      long blockBytesScanned =
+        context != null ? context.getBlockBytesScanned() - blockBytesScannedBefore : 0;
+      metricsRegionServer.updateIncrement(region, EnvironmentEdgeManager.currentTime() - before,
+        blockBytesScanned);
     }
     return r == null ? Result.EMPTY_RESULT : r;
   }
@@ -771,12 +779,11 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
       resultOrExceptionBuilder.clear();
       try {
         Result r = null;
-
+        long blockBytesScannedBefore = context != null ? context.getBlockBytesScanned() : 0;
         if (
           context != null && context.isRetryImmediatelySupported()
             && (context.getResponseCellSize() > maxQuotaResultSize
-              || context.getResponseBlockSize() + context.getResponseExceptionSize()
-                  > maxQuotaResultSize)
+              || blockBytesScannedBefore + context.getResponseExceptionSize() > maxQuotaResultSize)
         ) {
 
           // We're storing the exception since the exception and reason string won't
@@ -787,7 +794,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
             //
             // Instead just create the exception and then store it.
             sizeIOE = new MultiActionResultTooLarge("Max size exceeded" + " CellSize: "
-              + context.getResponseCellSize() + " BlockSize: " + context.getResponseBlockSize());
+              + context.getResponseCellSize() + " BlockSize: " + blockBytesScannedBefore);
 
             // Only report the exception once since there's only one request that
             // caused the exception. Otherwise this number will dominate the exceptions count.
@@ -828,7 +835,10 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
           } finally {
             final MetricsRegionServer metricsRegionServer = regionServer.getMetrics();
             if (metricsRegionServer != null) {
-              metricsRegionServer.updateGet(region, EnvironmentEdgeManager.currentTime() - before);
+              long blockBytesScanned =
+                context != null ? context.getBlockBytesScanned() - blockBytesScannedBefore : 0;
+              metricsRegionServer.updateGet(region, EnvironmentEdgeManager.currentTime() - before,
+                blockBytesScanned);
             }
           }
         } else if (action.hasServiceCall()) {
@@ -854,11 +864,11 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
           switch (type) {
             case APPEND:
               r = append(region, quota, action.getMutation(), cellScanner, nonceGroup,
-                spaceQuotaEnforcement);
+                spaceQuotaEnforcement, context);
               break;
             case INCREMENT:
               r = increment(region, quota, action.getMutation(), cellScanner, nonceGroup,
-                spaceQuotaEnforcement);
+                spaceQuotaEnforcement, context);
               break;
             case PUT:
             case DELETE:
@@ -1205,11 +1215,6 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
   public RSRpcServices(final HRegionServer rs) throws IOException {
     final Configuration conf = rs.getConfiguration();
     regionServer = rs;
-    rowSizeWarnThreshold =
-      conf.getInt(HConstants.BATCH_ROWS_THRESHOLD_NAME, HConstants.BATCH_ROWS_THRESHOLD_DEFAULT);
-    rejectRowsWithSizeOverThreshold =
-      conf.getBoolean(REJECT_BATCH_ROWS_OVER_THRESHOLD, DEFAULT_REJECT_BATCH_ROWS_OVER_THRESHOLD);
-
     final RpcSchedulerFactory rpcSchedulerFactory;
     try {
       rpcSchedulerFactory = getRpcSchedulerFactoryClass().asSubclass(RpcSchedulerFactory.class)
@@ -1250,10 +1255,9 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
     if (!(rs instanceof HMaster)) {
       rpcServer.setNamedQueueRecorder(rs.getNamedQueueRecorder());
     }
+    setReloadableGuardrails(conf);
     scannerLeaseTimeoutPeriod = conf.getInt(HConstants.HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD,
       HConstants.DEFAULT_HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD);
-    maxScannerResultSize = conf.getLong(HConstants.HBASE_SERVER_SCANNER_MAX_RESULT_SIZE_KEY,
-      HConstants.DEFAULT_HBASE_SERVER_SCANNER_MAX_RESULT_SIZE);
     rpcTimeout =
       conf.getInt(HConstants.HBASE_RPC_TIMEOUT_KEY, HConstants.DEFAULT_HBASE_RPC_TIMEOUT);
     minimumScanTimeLimitDelta = conf.getLong(REGION_SERVER_RPC_MINIMUM_SCAN_TIME_LIMIT_DELTA,
@@ -1300,6 +1304,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
   public void onConfigurationChange(Configuration newConf) {
     if (rpcServer instanceof ConfigurationObserver) {
       ((ConfigurationObserver) rpcServer).onConfigurationChange(newConf);
+      setReloadableGuardrails(newConf);
     }
   }
 
@@ -2513,6 +2518,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
     long before = EnvironmentEdgeManager.currentTime();
     OperationQuota quota = null;
     HRegion region = null;
+    RpcCallContext context = RpcServer.getCurrentCall().orElse(null);
     try {
       checkOpen();
       requestCount.increment();
@@ -2532,7 +2538,6 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
       }
       Boolean existence = null;
       Result r = null;
-      RpcCallContext context = RpcServer.getCurrentCall().orElse(null);
       quota = getRpcQuotaManager().checkQuota(region, OperationQuota.OperationType.GET);
 
       Get clientGet = ProtobufUtil.toGet(get);
@@ -2582,11 +2587,10 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
       throw new ServiceException(ie);
     } finally {
       final MetricsRegionServer metricsRegionServer = regionServer.getMetrics();
-      if (metricsRegionServer != null) {
-        TableDescriptor td = region != null ? region.getTableDescriptor() : null;
-        if (td != null) {
-          metricsRegionServer.updateGet(region, EnvironmentEdgeManager.currentTime() - before);
-        }
+      if (metricsRegionServer != null && region != null) {
+        long blockBytesScanned = context != null ? context.getBlockBytesScanned() : 0;
+        metricsRegionServer.updateGet(region, EnvironmentEdgeManager.currentTime() - before,
+          blockBytesScanned);
       }
       if (quota != null) {
         quota.close();
@@ -2801,7 +2805,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
             if (regionAction.getActionCount() == 1) {
               CheckAndMutateResult result =
                 checkAndMutate(region, quota, regionAction.getAction(0).getMutation(), cellScanner,
-                  regionAction.getCondition(), nonceGroup, spaceQuotaEnforcement);
+                  regionAction.getCondition(), nonceGroup, spaceQuotaEnforcement, context);
               regionActionResultBuilder.setProcessed(result.isSuccess());
               resultOrExceptionOrBuilder.setIndex(0);
               if (result.getResult() != null) {
@@ -2948,7 +2952,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
 
       if (request.hasCondition()) {
         CheckAndMutateResult result = checkAndMutate(region, quota, mutation, cellScanner,
-          request.getCondition(), nonceGroup, spaceQuotaEnforcement);
+          request.getCondition(), nonceGroup, spaceQuotaEnforcement, context);
         builder.setProcessed(result.isSuccess());
         boolean clientCellBlockSupported = isClientCellBlockSupport(context);
         addResult(builder, result.getResult(), controller, clientCellBlockSupported);
@@ -2962,11 +2966,13 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
         switch (type) {
           case APPEND:
             // TODO: this doesn't actually check anything.
-            r = append(region, quota, mutation, cellScanner, nonceGroup, spaceQuotaEnforcement);
+            r = append(region, quota, mutation, cellScanner, nonceGroup, spaceQuotaEnforcement,
+              context);
             break;
           case INCREMENT:
             // TODO: this doesn't actually check anything.
-            r = increment(region, quota, mutation, cellScanner, nonceGroup, spaceQuotaEnforcement);
+            r = increment(region, quota, mutation, cellScanner, nonceGroup, spaceQuotaEnforcement,
+              context);
             break;
           case PUT:
             put(region, quota, mutation, cellScanner, spaceQuotaEnforcement);
@@ -3033,8 +3039,9 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
 
   private CheckAndMutateResult checkAndMutate(HRegion region, OperationQuota quota,
     MutationProto mutation, CellScanner cellScanner, Condition condition, long nonceGroup,
-    ActivePolicyEnforcement spaceQuota) throws IOException {
+    ActivePolicyEnforcement spaceQuota, RpcCallContext context) throws IOException {
     long before = EnvironmentEdgeManager.currentTime();
+    long blockBytesScannedBefore = context != null ? context.getBlockBytesScanned() : 0;
     CheckAndMutate checkAndMutate = ProtobufUtil.toCheckAndMutate(condition, mutation, cellScanner);
     long nonce = mutation.hasNonce() ? mutation.getNonce() : HConstants.NO_NONCE;
     checkCellSizeLimit(region, (Mutation) checkAndMutate.getAction());
@@ -3054,7 +3061,9 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
     MetricsRegionServer metricsRegionServer = regionServer.getMetrics();
     if (metricsRegionServer != null) {
       long after = EnvironmentEdgeManager.currentTime();
-      metricsRegionServer.updateCheckAndMutate(region, after - before);
+      long blockBytesScanned =
+        context != null ? context.getBlockBytesScanned() - blockBytesScannedBefore : 0;
+      metricsRegionServer.updateCheckAndMutate(region, after - before, blockBytesScanned);
 
       MutationType type = mutation.getMutateType();
       switch (type) {
@@ -3343,7 +3352,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
         long maxCellSize = maxResultSize;
         long maxBlockSize = maxQuotaResultSize;
         if (rpcCall != null) {
-          maxBlockSize -= rpcCall.getResponseBlockSize();
+          maxBlockSize -= rpcCall.getBlockBytesScanned();
           maxCellSize -= rpcCall.getResponseCellSize();
         }
 
@@ -3461,6 +3470,10 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
         // Check to see if the client requested that we track metrics server side. If the
         // client requested metrics, retrieve the metrics from the scanner context.
         if (trackMetrics) {
+          // rather than increment yet another counter in StoreScanner, just set the value here
+          // from block size progress before writing into the response
+          scannerContext.getMetrics().countOfBlockBytesScanned
+            .set(scannerContext.getBlockSizeProgress());
           Map<String, Long> metrics = scannerContext.getMetrics().getMetricsMap();
           ScanMetrics.Builder metricBuilder = ScanMetrics.newBuilder();
           NameInt64Pair.Builder pairBuilder = NameInt64Pair.newBuilder();
@@ -3478,12 +3491,16 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
       region.closeRegionOperation();
       // Update serverside metrics, even on error.
       long end = EnvironmentEdgeManager.currentTime();
-      long responseCellSize = rpcCall != null ? rpcCall.getResponseCellSize() : 0;
+      long responseCellSize = 0;
+      long blockBytesScanned = 0;
+      if (rpcCall != null) {
+        responseCellSize = rpcCall.getResponseCellSize();
+        blockBytesScanned = rpcCall.getBlockBytesScanned();
+      }
       region.getMetrics().updateScanTime(end - before);
       final MetricsRegionServer metricsRegionServer = regionServer.getMetrics();
       if (metricsRegionServer != null) {
-        metricsRegionServer.updateScanSize(region, responseCellSize);
-        metricsRegionServer.updateScanTime(region, end - before);
+        metricsRegionServer.updateScan(region, end - before, responseCellSize, blockBytesScanned);
         metricsRegionServer.updateReadQueryMeter(region, numOfNextRawCalls);
       }
     }
@@ -4088,5 +4105,14 @@ public class RSRpcServices implements HBaseRPCErrorHandler, AdminService.Blockin
     regionServer.getBootstrapNodes()
       .forEachRemaining(server -> builder.addNode(ProtobufUtil.toServerName(server)));
     return builder.build();
+  }
+
+  private void setReloadableGuardrails(Configuration conf) {
+    rowSizeWarnThreshold =
+      conf.getInt(HConstants.BATCH_ROWS_THRESHOLD_NAME, HConstants.BATCH_ROWS_THRESHOLD_DEFAULT);
+    rejectRowsWithSizeOverThreshold =
+      conf.getBoolean(REJECT_BATCH_ROWS_OVER_THRESHOLD, DEFAULT_REJECT_BATCH_ROWS_OVER_THRESHOLD);
+    maxScannerResultSize = conf.getLong(HConstants.HBASE_SERVER_SCANNER_MAX_RESULT_SIZE_KEY,
+      HConstants.DEFAULT_HBASE_SERVER_SCANNER_MAX_RESULT_SIZE);
   }
 }

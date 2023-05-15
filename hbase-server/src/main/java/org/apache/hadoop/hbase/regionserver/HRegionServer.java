@@ -34,6 +34,7 @@ import static org.apache.hadoop.hbase.replication.regionserver.ReplicationMarker
 import static org.apache.hadoop.hbase.replication.regionserver.ReplicationMarkerChore.REPLICATION_MARKER_ENABLED_KEY;
 import static org.apache.hadoop.hbase.util.DNS.UNSAFE_RS_HOSTNAME_KEY;
 
+import com.google.errorprone.annotations.RestrictedApi;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.context.Scope;
@@ -237,7 +238,6 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.Reg
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.UserLoad;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.Coprocessor;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.Coprocessor.Builder;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.NameStringPair;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.RegionServerInfo;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.RegionSpecifier;
@@ -700,7 +700,7 @@ public class HRegionServer extends Thread
       initializeFileSystem();
 
       this.configurationManager = new ConfigurationManager();
-      setupWindows(getConfiguration(), getConfigurationManager());
+      setupWindows(conf, configurationManager);
 
       // Some unit tests don't need a cluster, so no zookeeper at all
       // Open connection to zookeeper and set primary watcher
@@ -1487,7 +1487,7 @@ public class HRegionServer extends Thread
     serverLoad.setUsedHeapMB((int) (usedMemory / 1024 / 1024));
     serverLoad.setMaxHeapMB((int) (maxMemory / 1024 / 1024));
     Set<String> coprocessors = getWAL(null).getCoprocessorHost().getCoprocessors();
-    Builder coprocessorBuilder = Coprocessor.newBuilder();
+    Coprocessor.Builder coprocessorBuilder = Coprocessor.newBuilder();
     for (String coprocessor : coprocessors) {
       serverLoad.addCoprocessors(coprocessorBuilder.setName(coprocessor).build());
     }
@@ -1667,32 +1667,29 @@ public class HRegionServer extends Thread
         // The hostname the master sees us as.
         if (key.equals(HConstants.KEY_FOR_HOSTNAME_SEEN_BY_MASTER)) {
           String hostnameFromMasterPOV = e.getValue();
-          this.serverName =
-            ServerName.valueOf(hostnameFromMasterPOV, rpcServices.isa.getPort(), this.startcode);
-          if (
-            !StringUtils.isBlank(useThisHostnameInstead)
-              && !hostnameFromMasterPOV.equals(useThisHostnameInstead)
-          ) {
-            String msg = "Master passed us a different hostname to use; was="
-              + this.useThisHostnameInstead + ", but now=" + hostnameFromMasterPOV;
-            LOG.error(msg);
-            throw new IOException(msg);
-          }
+          this.serverName = ServerName.valueOf(hostnameFromMasterPOV,
+            rpcServices.getSocketAddress().getPort(), this.startcode);
+          String expectedHostName = rpcServices.getSocketAddress().getHostName();
           // if Master use-ip is enabled, RegionServer use-ip will be enabled by default even if it
           // is set to disable. so we will use the ip of the RegionServer to compare with the
           // hostname passed by the Master, see HBASE-27304 for details.
-          InetSocketAddress isa = rpcServices.getSocketAddress();
-          // here getActiveMaster() is definitely not null.
-          String isaHostName = InetAddresses.isInetAddress(getActiveMaster().get().getHostname())
-            ? isa.getAddress().getHostAddress()
-            : isa.getHostName();
           if (
-            StringUtils.isBlank(useThisHostnameInstead)
-              && !hostnameFromMasterPOV.equals(isaHostName)
+            StringUtils.isBlank(useThisHostnameInstead) && getActiveMaster().isPresent()
+              && InetAddresses.isInetAddress(getActiveMaster().get().getHostname())
           ) {
+            expectedHostName = rpcServices.getSocketAddress().getAddress().getHostAddress();
+          }
+          boolean isHostnameConsist = StringUtils.isBlank(useThisHostnameInstead)
+            ? hostnameFromMasterPOV.equals(expectedHostName)
+            : hostnameFromMasterPOV.equals(useThisHostnameInstead);
+          if (!isHostnameConsist) {
             String msg = "Master passed us a different hostname to use; was="
-              + rpcServices.isa.getHostName() + ", but now=" + hostnameFromMasterPOV;
+              + (StringUtils.isBlank(useThisHostnameInstead)
+                ? rpcServices.getSocketAddress().getHostName()
+                : this.useThisHostnameInstead)
+              + ", but now=" + hostnameFromMasterPOV;
             LOG.error(msg);
+            throw new IOException(msg);
           }
           continue;
         }
@@ -2369,6 +2366,17 @@ public class HRegionServer extends Thread
   }
 
   private void registerConfigurationObservers() {
+    // Register Replication if possible, as now we support recreating replication peer storage, for
+    // migrating across different replication peer storages online
+    if (replicationSourceHandler instanceof ConfigurationObserver) {
+      configurationManager.registerObserver((ConfigurationObserver) replicationSourceHandler);
+    }
+    if (
+      replicationSourceHandler != replicationSinkHandler
+        && replicationSinkHandler instanceof ConfigurationObserver
+    ) {
+      configurationManager.registerObserver((ConfigurationObserver) replicationSinkHandler);
+    }
     // Registering the compactSplitThread object with the ConfigurationManager.
     configurationManager.registerObserver(this.compactSplitThread);
     configurationManager.registerObserver(this.rpcServices);
@@ -3824,8 +3832,9 @@ public class HRegionServer extends Thread
   }
 
   /** Returns : Returns the ConfigurationManager object for testing purposes. */
-  @InterfaceAudience.Private
-  ConfigurationManager getConfigurationManager() {
+  @RestrictedApi(explanation = "Should only be called in tests", link = "",
+      allowedOnPath = ".*/src/test/.*")
+  public ConfigurationManager getConfigurationManager() {
     return configurationManager;
   }
 

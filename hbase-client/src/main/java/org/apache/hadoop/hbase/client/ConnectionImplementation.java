@@ -161,12 +161,18 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.Enabl
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.EnableReplicationPeerResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.GetReplicationPeerConfigRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.GetReplicationPeerConfigResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.GetReplicationPeerModificationProceduresRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.GetReplicationPeerModificationProceduresResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.GetReplicationPeerStateRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.GetReplicationPeerStateResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.IsReplicationPeerModificationEnabledRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.IsReplicationPeerModificationEnabledResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.ListReplicationPeersRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.ListReplicationPeersResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.RemoveReplicationPeerRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.RemoveReplicationPeerResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.ReplicationPeerModificationSwitchRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.ReplicationPeerModificationSwitchResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.UpdateReplicationPeerConfigRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ReplicationProtos.UpdateReplicationPeerConfigResponse;
 
@@ -344,8 +350,8 @@ public class ConnectionImplementation implements ClusterConnection, Closeable {
 
       this.rpcClient = RpcClientFactory.createClient(this.conf, this.clusterId, this.metrics);
       this.rpcControllerFactory = RpcControllerFactory.instantiate(conf);
-      this.rpcCallerFactory =
-        RpcRetryingCallerFactory.instantiate(conf, interceptor, this.stats, this.metrics);
+      this.rpcCallerFactory = RpcRetryingCallerFactory.instantiate(conf, connectionConfig,
+        interceptor, this.stats, this.metrics);
       this.asyncProcess = new AsyncProcess(this, conf, rpcCallerFactory, rpcControllerFactory);
 
       // Do we publish the status?
@@ -1003,6 +1009,7 @@ public class ConnectionImplementation implements ClusterConnection, Closeable {
       // Query the meta region
       long pauseBase = connectionConfig.getPauseMillis();
       takeUserRegionLock();
+      final long lockStartTime = EnvironmentEdgeManager.currentTime();
       try {
         // We don't need to check if useCache is enabled or not. Even if useCache is false
         // we already cleared the cache for this row before acquiring userRegion lock so if this
@@ -1113,6 +1120,10 @@ public class ConnectionImplementation implements ClusterConnection, Closeable {
         }
       } finally {
         userRegionLock.unlock();
+        // update duration of the lock being held
+        if (metrics != null) {
+          metrics.updateUserRegionLockHeld(EnvironmentEdgeManager.currentTime() - lockStartTime);
+        }
       }
       try {
         Thread.sleep(ConnectionUtils.getPauseTime(pauseBase, tries));
@@ -1126,9 +1137,19 @@ public class ConnectionImplementation implements ClusterConnection, Closeable {
   void takeUserRegionLock() throws IOException {
     try {
       long waitTime = connectionConfig.getMetaOperationTimeout();
+      if (metrics != null) {
+        metrics.updateUserRegionLockQueue(userRegionLock.getQueueLength());
+      }
+      final long waitStartTime = EnvironmentEdgeManager.currentTime();
       if (!userRegionLock.tryLock(waitTime, TimeUnit.MILLISECONDS)) {
+        if (metrics != null) {
+          metrics.incrUserRegionLockTimeout();
+        }
         throw new LockTimeoutException("Failed to get user region lock in" + waitTime + " ms. "
           + " for accessing meta region server.");
+      } else if (metrics != null) {
+        // successfully grabbed the lock, start timer of holding the lock
+        metrics.updateUserRegionLockWaiting(EnvironmentEdgeManager.currentTime() - waitStartTime);
       }
     } catch (InterruptedException ie) {
       LOG.error("Interrupted while waiting for a lock", ie);
@@ -2020,6 +2041,27 @@ public class ConnectionImplementation implements ClusterConnection, Closeable {
         FlushMasterStoreRequest request) throws ServiceException {
         return stub.flushMasterStore(controller, request);
       }
+
+      @Override
+      public ReplicationPeerModificationSwitchResponse replicationPeerModificationSwitch(
+        RpcController controller, ReplicationPeerModificationSwitchRequest request)
+        throws ServiceException {
+        return stub.replicationPeerModificationSwitch(controller, request);
+      }
+
+      @Override
+      public GetReplicationPeerModificationProceduresResponse
+        getReplicationPeerModificationProcedures(RpcController controller,
+          GetReplicationPeerModificationProceduresRequest request) throws ServiceException {
+        return stub.getReplicationPeerModificationProcedures(controller, request);
+      }
+
+      @Override
+      public IsReplicationPeerModificationEnabledResponse isReplicationPeerModificationEnabled(
+        RpcController controller, IsReplicationPeerModificationEnabledRequest request)
+        throws ServiceException {
+        return stub.isReplicationPeerModificationEnabled(controller, request);
+      }
     };
   }
 
@@ -2250,8 +2292,8 @@ public class ConnectionImplementation implements ClusterConnection, Closeable {
 
   @Override
   public RpcRetryingCallerFactory getNewRpcRetryingCallerFactory(Configuration conf) {
-    return RpcRetryingCallerFactory.instantiate(conf, this.interceptor, this.getStatisticsTracker(),
-      metrics);
+    return RpcRetryingCallerFactory.instantiate(conf, connectionConfig, this.interceptor,
+      this.getStatisticsTracker(), metrics);
   }
 
   @Override
