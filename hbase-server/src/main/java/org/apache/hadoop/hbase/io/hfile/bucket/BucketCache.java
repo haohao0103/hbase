@@ -178,6 +178,8 @@ public class BucketCache implements BlockCache, HeapSize {
 
   private final BucketCacheStats cacheStats = new BucketCacheStats();
 
+  /** BucketCache persister thread */
+  private BucketCachePersister cachePersister;
   private final String persistencePath;
   static AtomicBoolean isCacheInconsistent = new AtomicBoolean(false);
   private final long cacheCapacity;
@@ -377,8 +379,8 @@ public class BucketCache implements BlockCache, HeapSize {
   }
 
   void startBucketCachePersisterThread() {
-    BucketCachePersister cachePersister =
-      new BucketCachePersister(this, bucketcachePersistInterval);
+    cachePersister = new BucketCachePersister(this, bucketcachePersistInterval);
+    cachePersister.setDaemon(true);
     cachePersister.start();
   }
 
@@ -424,6 +426,10 @@ public class BucketCache implements BlockCache, HeapSize {
       throw new IllegalArgumentException(
         "Don't understand io engine name for cache- prefix with file:, files:, mmap: or offheap");
     }
+  }
+
+  public boolean isCachePersistenceEnabled() {
+    return (prefetchedFileListPath != null) && (persistencePath != null);
   }
 
   /**
@@ -610,6 +616,9 @@ public class BucketCache implements BlockCache, HeapSize {
       cacheStats.evicted(bucketEntry.getCachedTime(), cacheKey.isPrimary());
     }
     if (ioEngine.isPersistent()) {
+      if (prefetchedFileListPath != null) {
+        PrefetchExecutor.removePrefetchedFileWhileEvict(cacheKey.getHfileName());
+      }
       setCacheInconsistent(true);
     }
   }
@@ -1408,6 +1417,7 @@ public class BucketCache implements BlockCache, HeapSize {
     LOG.info("Shutdown bucket cache: IO persistent=" + ioEngine.isPersistent() + "; path to write="
       + persistencePath);
     if (ioEngine.isPersistent() && persistencePath != null) {
+      cachePersister.interrupt();
       try {
         join();
         persistToFile();
