@@ -1638,8 +1638,9 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
     @Override
     protected void chore() {
       for (Region r : this.instance.onlineRegions.values()) {
-        // Skip compaction if region is read only
-        if (r == null || r.isReadOnly()) {
+        // If region is read only or compaction is disabled at table level, there's no need to
+        // iterate through region's stores
+        if (r == null || r.isReadOnly() || !r.getTableDescriptor().isCompactionEnabled()) {
           continue;
         }
 
@@ -2074,6 +2075,7 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
     }
     // Registering the compactSplitThread object with the ConfigurationManager.
     configurationManager.registerObserver(this.compactSplitThread);
+    configurationManager.registerObserver(this.cacheFlusher);
     configurationManager.registerObserver(this.rpcServices);
     configurationManager.registerObserver(this);
   }
@@ -2454,7 +2456,7 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
       bootstrapNodeManager.stop();
     }
     if (this.cacheFlusher != null) {
-      this.cacheFlusher.join();
+      this.cacheFlusher.shutdown();
     }
     if (this.walRoller != null) {
       this.walRoller.close();

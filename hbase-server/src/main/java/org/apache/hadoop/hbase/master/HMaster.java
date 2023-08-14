@@ -54,6 +54,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -229,6 +230,7 @@ import org.apache.hadoop.hbase.replication.SyncReplicationState;
 import org.apache.hadoop.hbase.replication.ZKReplicationQueueStorageForMigration;
 import org.apache.hadoop.hbase.replication.master.ReplicationHFileCleaner;
 import org.apache.hadoop.hbase.replication.master.ReplicationLogCleaner;
+import org.apache.hadoop.hbase.replication.master.ReplicationLogCleanerBarrier;
 import org.apache.hadoop.hbase.replication.master.ReplicationSinkTrackerTableCreator;
 import org.apache.hadoop.hbase.replication.regionserver.ReplicationSyncUp;
 import org.apache.hadoop.hbase.replication.regionserver.ReplicationSyncUp.ReplicationSyncUpToolInfo;
@@ -363,6 +365,12 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
   private AssignmentManager assignmentManager;
 
   private RSGroupInfoManager rsGroupInfoManager;
+
+  private final ReplicationLogCleanerBarrier replicationLogCleanerBarrier =
+    new ReplicationLogCleanerBarrier();
+
+  // Only allow to add one sync replication peer concurrently
+  private final Semaphore syncReplicationPeerLock = new Semaphore(1);
 
   // manager of replication
   private ReplicationPeerManager replicationPeerManager;
@@ -4106,6 +4114,16 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     return replicationPeerManager;
   }
 
+  @Override
+  public ReplicationLogCleanerBarrier getReplicationLogCleanerBarrier() {
+    return replicationLogCleanerBarrier;
+  }
+
+  @Override
+  public Semaphore getSyncReplicationPeerLock() {
+    return syncReplicationPeerLock;
+  }
+
   public HashMap<String, List<Pair<ServerName, ReplicationLoadSource>>>
     getReplicationLoad(ServerName[] serverNames) {
     List<ReplicationPeerDescription> peerList = this.getReplicationPeerManager().listPeers(null);
@@ -4208,6 +4226,11 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
           continue;
         }
         RegionMetrics regionMetrics = sl.getRegionMetrics().get(regionInfo.getRegionName());
+        if (regionMetrics == null) {
+          LOG.warn("Can not get compaction details for the region: {} , it may be not online.",
+            regionInfo.getRegionNameAsString());
+          continue;
+        }
         if (regionMetrics.getCompactionState() == CompactionState.MAJOR) {
           if (compactionState == CompactionState.MINOR) {
             compactionState = CompactionState.MAJOR_AND_MINOR;

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="https://maven.apache.org/POM/4.0.0" xmlns:xsi="https://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="https://maven.apache.org/POM/4.0.0 https://maven.apache.org/maven-v4_0_0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
   <!--
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -773,7 +773,7 @@
     </site>
   </distributionManagement>
   <properties>
-    <revision>3.0.0-alpha-4-SNAPSHOT</revision>
+    <revision>4.0.0-alpha-1-SNAPSHOT</revision>
     <!-- override on command line to have generated LICENSE files include
          diagnostic info for verifying notice requirements -->
     <license.debug.print.included>false</license.debug.print.included>
@@ -819,7 +819,7 @@
     <commons-io.version>2.11.0</commons-io.version>
     <commons-lang3.version>3.9</commons-lang3.version>
     <commons-math.version>3.6.1</commons-math.version>
-    <disruptor.version>3.4.2</disruptor.version>
+    <disruptor.version>3.4.4</disruptor.version>
     <httpclient.version>4.5.13</httpclient.version>
     <httpcore.version>4.4.13</httpcore.version>
     <metrics-core.version>3.2.6</metrics-core.version>
@@ -864,7 +864,7 @@
       When updating checkstyle.version, please make the same change in `.idea/checkstyle-idea.xml`
     -->
     <checkstyle.version>8.29</checkstyle.version>
-    <exec.maven.version>1.6.0</exec.maven.version>
+    <exec.maven.version>3.1.0</exec.maven.version>
     <error-prone.version>2.16</error-prone.version>
     <jamon.plugin.version>2.4.2</jamon.plugin.version>
     <lifecycle.mapping.version>1.0.0</lifecycle.mapping.version>
@@ -889,7 +889,7 @@
     <aircompressor.version>0.24</aircompressor.version>
     <brotli4j.version>1.11.0</brotli4j.version>
     <lz4.version>1.8.0</lz4.version>
-    <snappy.version>1.1.9.1</snappy.version>
+    <snappy.version>1.1.10.1</snappy.version>
     <xz.version>1.9</xz.version>
     <zstd-jni.version>1.5.5-2</zstd-jni.version>
     <hbase-thirdparty.version>4.1.4</hbase-thirdparty.version>
@@ -2905,19 +2905,6 @@
           </formats>
         </configuration>
       </plugin>
-      <plugin>
-        <groupId>org.cyclonedx</groupId>
-        <artifactId>cyclonedx-maven-plugin</artifactId>
-        <version>2.7.3</version>
-        <executions>
-          <execution>
-            <goals>
-              <goal>makeBom</goal>
-            </goals>
-            <phase>package</phase>
-          </execution>
-        </executions>
-      </plugin>
     </plugins>
     <extensions>
       <extension>
@@ -3486,6 +3473,19 @@
                 <version>${extra.enforcer.version}</version>
               </dependency>
             </dependencies>
+          </plugin>
+          <plugin>
+            <groupId>org.cyclonedx</groupId>
+            <artifactId>cyclonedx-maven-plugin</artifactId>
+            <version>2.7.6</version>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>makeBom</goal>
+                </goals>
+                <phase>package</phase>
+              </execution>
+            </executions>
           </plugin>
         </plugins>
       </build>
