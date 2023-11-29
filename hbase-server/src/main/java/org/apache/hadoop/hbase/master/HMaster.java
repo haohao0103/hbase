@@ -157,6 +157,7 @@ import org.apache.hadoop.hbase.master.procedure.DeleteNamespaceProcedure;
 import org.apache.hadoop.hbase.master.procedure.DeleteTableProcedure;
 import org.apache.hadoop.hbase.master.procedure.DisableTableProcedure;
 import org.apache.hadoop.hbase.master.procedure.EnableTableProcedure;
+import org.apache.hadoop.hbase.master.procedure.FlushTableProcedure;
 import org.apache.hadoop.hbase.master.procedure.InitMetaProcedure;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureConstants;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
@@ -168,6 +169,7 @@ import org.apache.hadoop.hbase.master.procedure.ProcedurePrepareLatch;
 import org.apache.hadoop.hbase.master.procedure.ProcedureSyncWait;
 import org.apache.hadoop.hbase.master.procedure.ReopenTableRegionsProcedure;
 import org.apache.hadoop.hbase.master.procedure.ServerCrashProcedure;
+import org.apache.hadoop.hbase.master.procedure.TruncateRegionProcedure;
 import org.apache.hadoop.hbase.master.procedure.TruncateTableProcedure;
 import org.apache.hadoop.hbase.master.region.MasterRegion;
 import org.apache.hadoop.hbase.master.region.MasterRegionFactory;
@@ -1162,7 +1164,7 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
           procedureExecutor.submitProcedure(new ModifyTableProcedure(
             procedureExecutor.getEnvironment(), TableDescriptorBuilder.newBuilder(metaDesc)
               .setRegionReplication(replicasNumInConf).build(),
-            null, metaDesc, false));
+            null, metaDesc, false, true));
         }
       }
     }
@@ -1411,7 +1413,7 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
     RetryCounter rc = null;
     while (!isStopped()) {
       RegionState rs = this.assignmentManager.getRegionStates().getRegionState(ri);
-      if (rs.isOpened()) {
+      if (rs != null && rs.isOpened()) {
         if (this.getServerManager().isServerOnline(rs.getServerName())) {
           return true;
         }
@@ -2567,6 +2569,36 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
   }
 
   @Override
+  public long truncateRegion(final RegionInfo regionInfo, final long nonceGroup, final long nonce)
+    throws IOException {
+    checkInitialized();
+
+    return MasterProcedureUtil
+      .submitProcedure(new MasterProcedureUtil.NonceProcedureRunnable(this, nonceGroup, nonce) {
+        @Override
+        protected void run() throws IOException {
+          getMaster().getMasterCoprocessorHost().preTruncateRegion(regionInfo);
+
+          LOG.info(
+            getClientIdAuditPrefix() + " truncate region " + regionInfo.getRegionNameAsString());
+
+          // Execute the operation asynchronously
+          ProcedurePrepareLatch latch = ProcedurePrepareLatch.createLatch(2, 0);
+          submitProcedure(
+            new TruncateRegionProcedure(procedureExecutor.getEnvironment(), regionInfo, latch));
+          latch.await();
+
+          getMaster().getMasterCoprocessorHost().postTruncateRegion(regionInfo);
+        }
+
+        @Override
+        protected String getDescription() {
+          return "TruncateRegionProcedure";
+        }
+      });
+  }
+
+  @Override
   public long addColumn(final TableName tableName, final ColumnFamilyDescriptor column,
     final long nonceGroup, final long nonce) throws IOException {
     checkInitialized();
@@ -2762,6 +2794,13 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
   private long modifyTable(final TableName tableName,
     final TableDescriptorGetter newDescriptorGetter, final long nonceGroup, final long nonce,
     final boolean shouldCheckDescriptor) throws IOException {
+    return modifyTable(tableName, newDescriptorGetter, nonceGroup, nonce, shouldCheckDescriptor,
+      true);
+  }
+
+  private long modifyTable(final TableName tableName,
+    final TableDescriptorGetter newDescriptorGetter, final long nonceGroup, final long nonce,
+    final boolean shouldCheckDescriptor, final boolean reopenRegions) throws IOException {
     return MasterProcedureUtil
       .submitProcedure(new MasterProcedureUtil.NonceProcedureRunnable(this, nonceGroup, nonce) {
         @Override
@@ -2780,7 +2819,7 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
           // checks. This will block only the beginning of the procedure. See HBASE-19953.
           ProcedurePrepareLatch latch = ProcedurePrepareLatch.createBlockingLatch();
           submitProcedure(new ModifyTableProcedure(procedureExecutor.getEnvironment(),
-            newDescriptor, latch, oldDescriptor, shouldCheckDescriptor));
+            newDescriptor, latch, oldDescriptor, shouldCheckDescriptor, reopenRegions));
           latch.await();
 
           getMaster().getMasterCoprocessorHost().postModifyTable(tableName, oldDescriptor,
@@ -2797,14 +2836,14 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
 
   @Override
   public long modifyTable(final TableName tableName, final TableDescriptor newDescriptor,
-    final long nonceGroup, final long nonce) throws IOException {
+    final long nonceGroup, final long nonce, final boolean reopenRegions) throws IOException {
     checkInitialized();
     return modifyTable(tableName, new TableDescriptorGetter() {
       @Override
       public TableDescriptor get() throws IOException {
         return newDescriptor;
       }
-    }, nonceGroup, nonce, false);
+    }, nonceGroup, nonce, false, reopenRegions);
 
   }
 
@@ -4380,5 +4419,35 @@ public class HMaster extends HBaseServerBase<MasterRpcServices> implements Maste
   private void initializeCoprocessorHost(Configuration conf) {
     // initialize master side coprocessors before we start handling requests
     this.cpHost = new MasterCoprocessorHost(this, conf);
+  }
+
+  @Override
+  public long flushTable(TableName tableName, List<byte[]> columnFamilies, long nonceGroup,
+    long nonce) throws IOException {
+    checkInitialized();
+
+    if (
+      !getConfiguration().getBoolean(MasterFlushTableProcedureManager.FLUSH_PROCEDURE_ENABLED,
+        MasterFlushTableProcedureManager.FLUSH_PROCEDURE_ENABLED_DEFAULT)
+    ) {
+      throw new DoNotRetryIOException("FlushTableProcedureV2 is DISABLED");
+    }
+
+    return MasterProcedureUtil
+      .submitProcedure(new MasterProcedureUtil.NonceProcedureRunnable(this, nonceGroup, nonce) {
+        @Override
+        protected void run() throws IOException {
+          getMaster().getMasterCoprocessorHost().preTableFlush(tableName);
+          LOG.info(getClientIdAuditPrefix() + " flush " + tableName);
+          submitProcedure(
+            new FlushTableProcedure(procedureExecutor.getEnvironment(), tableName, columnFamilies));
+          getMaster().getMasterCoprocessorHost().postTableFlush(tableName);
+        }
+
+        @Override
+        protected String getDescription() {
+          return "FlushTableProcedure";
+        }
+      });
   }
 }

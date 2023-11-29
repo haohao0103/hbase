@@ -15,19 +15,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.hadoop.hbase.io.hfile;
+package org.apache.hadoop.hbase.util;
 
-import java.util.Map;
+import java.io.IOException;
+import org.apache.yetus.audience.InterfaceAudience;
 
-import org.apache.hadoop.hbase.shaded.protobuf.generated.PersistentPrefetchProtos;
+@InterfaceAudience.Private
+@FunctionalInterface
+public interface IOExceptionRunnable {
 
-final class PrefetchProtoUtils {
-  private PrefetchProtoUtils() {
-  }
-
-  static PersistentPrefetchProtos.PrefetchedHfileName
-    toPB(Map<String, Boolean> prefetchedHfileNames) {
-    return PersistentPrefetchProtos.PrefetchedHfileName.newBuilder()
-      .putAllPrefetchedFiles(prefetchedHfileNames).build();
-  }
+  void run() throws IOException;
 }

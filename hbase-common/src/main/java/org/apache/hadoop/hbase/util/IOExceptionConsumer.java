@@ -15,17 +15,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-syntax = "proto2";
+package org.apache.hadoop.hbase.util;
 
-package hbase.pb;
+import java.io.IOException;
+import org.apache.yetus.audience.InterfaceAudience;
 
-option java_package = "org.apache.hadoop.hbase.shaded.protobuf.generated";
-option java_outer_classname = "PersistentPrefetchProtos";
-option java_generic_services = true;
-option java_generate_equals_and_hash = true;
-option optimize_for = SPEED;
+@InterfaceAudience.Private
+@FunctionalInterface
+public interface IOExceptionConsumer<T> {
 
-
-message PrefetchedHfileName {
-  map<string, bool> prefetched_files = 1;
+  void accept(T t) throws IOException;
 }

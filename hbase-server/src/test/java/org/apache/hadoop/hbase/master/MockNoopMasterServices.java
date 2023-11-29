@@ -80,6 +80,12 @@ public class MockNoopMasterServices implements MasterServices {
   }
 
   @Override
+  public long truncateRegion(RegionInfo regionInfo, long nonceGroup, long nonce)
+    throws IOException {
+    return 0;
+  }
+
+  @Override
   public long createTable(final TableDescriptor desc, final byte[][] splitKeys,
     final long nonceGroup, final long nonce) throws IOException {
     // no-op
@@ -254,6 +260,12 @@ public class MockNoopMasterServices implements MasterServices {
   @Override
   public long modifyTable(final TableName tableName, final TableDescriptor descriptor,
     final long nonceGroup, final long nonce) throws IOException {
+    return -1;
+  }
+
+  @Override
+  public long modifyTable(TableName tableName, TableDescriptor descriptor, long nonceGroup,
+    long nonce, boolean reopenRegions) throws IOException {
     return -1;
   }
 
@@ -535,5 +547,11 @@ public class MockNoopMasterServices implements MasterServices {
   @Override
   public Semaphore getSyncReplicationPeerLock() {
     return null;
+  }
+
+  @Override
+  public long flushTable(TableName tableName, List<byte[]> columnFamilies, long nonceGroup,
+    long nonce) throws IOException {
+    return 0;
   }
 }

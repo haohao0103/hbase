@@ -93,8 +93,6 @@ public class CacheConfig {
   public static final String DROP_BEHIND_CACHE_COMPACTION_KEY =
     "hbase.hfile.drop.behind.compaction";
 
-  public static final String PREFETCH_PERSISTENCE_PATH_KEY = "hbase.prefetch.file.list.path";
-
   /**
    * Configuration key to set interval for persisting bucket cache to disk.
    */
@@ -345,7 +343,7 @@ public class CacheConfig {
 
   /** Returns true if blocks should be prefetched into the cache on open, false if not */
   public boolean shouldPrefetchOnOpen() {
-    return this.prefetchOnOpen;
+    return this.prefetchOnOpen && this.cacheDataOnRead;
   }
 
   /** Returns true if blocks should be cached while writing during compaction, false if not */

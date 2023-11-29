@@ -82,6 +82,7 @@ message ModifyTableStateData {
   required TableSchema modified_table_schema = 3;
   required bool delete_column_family_in_modify = 4;
   optional bool should_check_descriptor = 5;
+  optional bool reopen_regions = 6;
 }
 
 enum TruncateTableState {
@@ -100,6 +101,14 @@ message TruncateTableStateData {
   optional TableName table_name = 3;
   optional TableSchema table_schema = 4;
   repeated RegionInfo region_info = 5;
+}
+
+enum TruncateRegionState {
+  TRUNCATE_REGION_PRE_OPERATION = 1;
+  TRUNCATE_REGION_MAKE_OFFLINE = 2;
+  TRUNCATE_REGION_REMOVE = 3;
+  TRUNCATE_REGION_MAKE_ONLINE = 4;
+  TRUNCATE_REGION_POST_OPERATION = 5;
 }
 
 enum DeleteTableState {
@@ -189,6 +198,26 @@ message RestoreParentToChildRegionsPair {
   required string parent_region_name = 1;
   required string child1_region_name = 2;
   required string child2_region_name = 3;
+}
+
+enum FlushTableState {
+  FLUSH_TABLE_PREPARE = 1;
+  FLUSH_TABLE_FLUSH_REGIONS = 2;
+}
+
+message FlushTableProcedureStateData {
+  required TableName table_name = 1;
+  repeated bytes column_family = 2;
+}
+
+message FlushRegionProcedureStateData {
+  required RegionInfo region = 1;
+  repeated bytes column_family = 2;
+}
+
+message FlushRegionParameter {
+  required RegionInfo region = 1;
+  repeated bytes column_family = 2;
 }
 
 enum SnapshotState {
