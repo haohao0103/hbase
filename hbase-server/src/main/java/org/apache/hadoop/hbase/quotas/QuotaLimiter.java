@@ -76,6 +76,22 @@ public interface QuotaLimiter {
   /** Returns the number of bytes available to read to avoid exceeding the quota */
   long getReadAvailable();
 
+  /** Returns the maximum number of bytes ever available to read */
+  long getReadLimit();
+
+  /** Returns the maximum number of bytes ever available to write */
+  long getWriteLimit();
+
   /** Returns the number of bytes available to write to avoid exceeding the quota */
   long getWriteAvailable();
+
+  /** Returns the maximum number of requests to allow per TimeUnit */
+  long getRequestNumLimit();
+
+  /** Returns the maximum number of reads to allow per TimeUnit */
+  long getReadNumLimit();
+
+  /** Returns the maximum number of writes to allow per TimeUnit */
+  long getWriteNumLimit();
+
 }

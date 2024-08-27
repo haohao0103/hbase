@@ -24,11 +24,12 @@ import static org.junit.Assert.assertFalse;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
+import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
-import org.apache.hadoop.hbase.CellScanner;
+import org.apache.hadoop.hbase.ExtendedCellScanner;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.ipc.RpcCall;
 import org.apache.hadoop.hbase.ipc.RpcCallback;
@@ -80,7 +81,7 @@ public class TestRpcLogDetails {
     ProtobufUtil.mergeFrom(messageBuilder, cis, buffer.capacity());
     Message message = messageBuilder.build();
     RpcLogDetails rpcLogDetails =
-      new RpcLogDetails(getRpcCall(message), message, null, 0L, 0L, null, true, false);
+      new RpcLogDetails(getRpcCall(message), message, null, 0L, 0L, 0, null, true, false);
 
     // log's scan should be equal
     ClientProtos.Scan logScan = ((ClientProtos.ScanRequest) rpcLogDetails.getParam()).getScan();
@@ -117,7 +118,7 @@ public class TestRpcLogDetails {
       }
 
       @Override
-      public CellScanner getCellScanner() {
+      public ExtendedCellScanner getCellScanner() {
         return null;
       }
 
@@ -181,7 +182,7 @@ public class TestRpcLogDetails {
       }
 
       @Override
-      public void setResponse(Message param, CellScanner cells, Throwable errorThrowable,
+      public void setResponse(Message param, ExtendedCellScanner cells, Throwable errorThrowable,
         String error) {
       }
 
@@ -211,6 +212,11 @@ public class TestRpcLogDetails {
       @Override
       public Optional<User> getRequestUser() {
         return null;
+      }
+
+      @Override
+      public Optional<X509Certificate[]> getClientCertificateChain() {
+        return Optional.empty();
       }
 
       @Override
@@ -257,6 +263,16 @@ public class TestRpcLogDetails {
 
       @Override
       public void incrementResponseExceptionSize(long exceptionSize) {
+      }
+
+      @Override
+      public void updateFsReadTime(long latencyMillis) {
+
+      }
+
+      @Override
+      public long getFsReadTime() {
+        return 0;
       }
     };
     return rpcCall;

@@ -24,6 +24,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
@@ -76,7 +77,7 @@ public class MapReduceHFileSplitterJob extends Configured implements Tool {
     public void map(NullWritable key, Cell value, Context context)
       throws IOException, InterruptedException {
       context.write(new ImmutableBytesWritable(CellUtil.cloneRow(value)),
-        new MapReduceExtendedCell(value));
+        new MapReduceExtendedCell(PrivateCellUtil.ensureExtendedCell(value)));
     }
 
     @Override
@@ -99,6 +100,10 @@ public class MapReduceHFileSplitterJob extends Configured implements Tool {
     conf.set(FileInputFormat.INPUT_DIR, inputDirs);
     Job job = Job.getInstance(conf,
       conf.get(JOB_NAME_CONF_KEY, NAME + "_" + EnvironmentEdgeManager.currentTime()));
+    // MapReduceHFileSplitter needs ExtendedCellSerialization so that sequenceId can be propagated
+    // when sorting cells in CellSortReducer
+    job.getConfiguration().setBoolean(HFileOutputFormat2.EXTENDED_CELL_SERIALIZATION_ENABLED_KEY,
+      true);
     job.setJarByClass(MapReduceHFileSplitterJob.class);
     job.setInputFormatClass(HFileInputFormat.class);
     job.setMapOutputKeyClass(ImmutableBytesWritable.class);
@@ -118,7 +123,7 @@ public class MapReduceHFileSplitterJob extends Configured implements Tool {
       }
       LOG.debug("success configuring load incremental job");
 
-      TableMapReduceUtil.addDependencyJars(job.getConfiguration(),
+      TableMapReduceUtil.addDependencyJarsForClasses(job.getConfiguration(),
         org.apache.hbase.thirdparty.com.google.common.base.Preconditions.class);
     } else {
       throw new IOException("No bulk output directory specified");

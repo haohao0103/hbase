@@ -46,6 +46,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.ExtendedCell;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.KeyValue;
@@ -86,8 +87,8 @@ import org.apache.hadoop.mapreduce.OutputCommitter;
 import org.apache.hadoop.mapreduce.OutputFormat;
 import org.apache.hadoop.mapreduce.RecordWriter;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
-import org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.PathOutputCommitter;
 import org.apache.hadoop.mapreduce.lib.partition.TotalOrderPartitioner;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
@@ -162,10 +163,10 @@ public class HFileOutputFormat2 extends FileOutputFormat<ImmutableBytesWritable,
 
   /**
    * ExtendedCell and ExtendedCellSerialization are InterfaceAudience.Private. We expose this config
-   * package-private for internal usage for jobs like WALPlayer which need to use features of
-   * ExtendedCell.
+   * for internal usage in jobs like WALPlayer which need to use features of ExtendedCell.
    */
-  static final String EXTENDED_CELL_SERIALIZATION_ENABLED_KEY =
+  @InterfaceAudience.Private
+  public static final String EXTENDED_CELL_SERIALIZATION_ENABLED_KEY =
     "hbase.mapreduce.hfileoutputformat.extendedcell.enabled";
   static final boolean EXTENDED_CELL_SERIALIZATION_ENABLED_DEFULT = false;
 
@@ -194,7 +195,7 @@ public class HFileOutputFormat2 extends FileOutputFormat<ImmutableBytesWritable,
     final TaskAttemptContext context, final OutputCommitter committer) throws IOException {
 
     // Get the path of the temporary output file
-    final Path outputDir = ((FileOutputCommitter) committer).getWorkPath();
+    final Path outputDir = ((PathOutputCommitter) committer).getWorkPath();
     final Configuration conf = context.getConfiguration();
     final boolean writeMultipleTables =
       conf.getBoolean(MULTI_TABLE_HFILEOUTPUTFORMAT_CONF_KEY, false);
@@ -239,13 +240,13 @@ public class HFileOutputFormat2 extends FileOutputFormat<ImmutableBytesWritable,
 
       @Override
       public void write(ImmutableBytesWritable row, V cell) throws IOException {
-        Cell kv = cell;
         // null input == user explicitly wants to flush
-        if (row == null && kv == null) {
+        if (row == null && cell == null) {
           rollWriters(null);
           return;
         }
 
+        ExtendedCell kv = PrivateCellUtil.ensureExtendedCell(cell);
         byte[] rowKey = CellUtil.cloneRow(kv);
         int length = (PrivateCellUtil.estimatedSerializedSizeOf(kv)) - Bytes.SIZEOF_INT;
         byte[] family = CellUtil.cloneFamily(kv);
@@ -320,8 +321,8 @@ public class HFileOutputFormat2 extends FileOutputFormat<ImmutableBytesWritable,
         }
 
         // we now have the proper WAL writer. full steam ahead
-        PrivateCellUtil.updateLatestStamp(cell, this.now);
-        wl.writer.append(kv);
+        PrivateCellUtil.updateLatestStamp(kv, this.now);
+        wl.writer.append((ExtendedCell) kv);
         wl.written += length;
 
         // Copy the row so we know when a row transition.

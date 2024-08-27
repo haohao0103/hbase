@@ -29,6 +29,8 @@ import org.apache.hadoop.hbase.ArrayBackedTag;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.ExtendedCell;
+import org.apache.hadoop.hbase.ExtendedCellScanner;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtil;
 import org.apache.hadoop.hbase.HConstants;
@@ -124,32 +126,46 @@ public class TestTags {
 
     try (Connection connection = ConnectionFactory.createConnection(conf)) {
       for (DataBlockEncoding encoding : DataBlockEncoding.values()) {
-        testReverseScanWithDBE(connection, encoding, family);
+        testReverseScanWithDBE(connection, encoding, family, HConstants.DEFAULT_BLOCKSIZE, 10);
       }
     }
   }
 
-  private void testReverseScanWithDBE(Connection conn, DataBlockEncoding encoding, byte[] family)
-    throws IOException {
+  /**
+   * Test that we can do reverse scans when writing tags and using DataBlockEncoding. Fails with an
+   * exception for PREFIX, DIFF, and FAST_DIFF
+   */
+  @Test
+  public void testReverseScanWithDBEWhenCurrentBlockUpdates() throws IOException {
+    byte[] family = Bytes.toBytes("0");
+
+    Configuration conf = new Configuration(TEST_UTIL.getConfiguration());
+    conf.setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, 1);
+
+    try (Connection connection = ConnectionFactory.createConnection(conf)) {
+      for (DataBlockEncoding encoding : DataBlockEncoding.values()) {
+        testReverseScanWithDBE(connection, encoding, family, 1024, 30000);
+      }
+    }
+  }
+
+  private void testReverseScanWithDBE(Connection conn, DataBlockEncoding encoding, byte[] family,
+    int blockSize, int maxRows) throws IOException {
     LOG.info("Running test with DBE={}", encoding);
     TableName tableName = TableName.valueOf(TEST_NAME.getMethodName() + "-" + encoding);
-    TEST_UTIL.createTable(TableDescriptorBuilder.newBuilder(tableName)
-      .setColumnFamily(
-        ColumnFamilyDescriptorBuilder.newBuilder(family).setDataBlockEncoding(encoding).build())
-      .build(), null);
+    TEST_UTIL.createTable(
+      TableDescriptorBuilder.newBuilder(tableName).setColumnFamily(ColumnFamilyDescriptorBuilder
+        .newBuilder(family).setDataBlockEncoding(encoding).setBlocksize(blockSize).build()).build(),
+      null);
 
     Table table = conn.getTable(tableName);
 
-    int maxRows = 10;
     byte[] val1 = new byte[10];
     byte[] val2 = new byte[10];
     Bytes.random(val1);
     Bytes.random(val2);
 
     for (int i = 0; i < maxRows; i++) {
-      if (i == maxRows / 2) {
-        TEST_UTIL.flush(tableName);
-      }
       table.put(new Put(Bytes.toBytes(i)).addColumn(family, Bytes.toBytes(1), val1)
         .addColumn(family, Bytes.toBytes(2), val2).setTTL(600_000));
     }
@@ -295,9 +311,9 @@ public class TestTags {
       try {
         Result[] next = scanner.next(3);
         for (Result result : next) {
-          CellScanner cellScanner = result.cellScanner();
+          ExtendedCellScanner cellScanner = result.cellScanner();
           cellScanner.advance();
-          Cell current = cellScanner.current();
+          ExtendedCell current = cellScanner.current();
           assertEquals(0, current.getTagsLength());
         }
       } finally {
@@ -312,9 +328,9 @@ public class TestTags {
       try {
         Result[] next = scanner.next(3);
         for (Result result : next) {
-          CellScanner cellScanner = result.cellScanner();
+          ExtendedCellScanner cellScanner = result.cellScanner();
           cellScanner.advance();
-          Cell current = cellScanner.current();
+          ExtendedCell current = cellScanner.current();
           assertEquals(0, current.getTagsLength());
         }
       } finally {
@@ -475,7 +491,7 @@ public class TestTags {
       TestCoprocessorForTags.checkTagPresence = true;
       ResultScanner scanner = table.getScanner(new Scan());
       Result result = scanner.next();
-      KeyValue kv = KeyValueUtil.ensureKeyValue(result.getColumnLatestCell(f, q));
+      KeyValue kv = KeyValueUtil.ensureKeyValue((ExtendedCell) result.getColumnLatestCell(f, q));
       List<Tag> tags = TestCoprocessorForTags.tags;
       assertEquals(3L, Bytes.toLong(kv.getValueArray(), kv.getValueOffset(), kv.getValueLength()));
       assertEquals(1, tags.size());
@@ -490,7 +506,7 @@ public class TestTags {
       TestCoprocessorForTags.checkTagPresence = true;
       scanner = table.getScanner(new Scan());
       result = scanner.next();
-      kv = KeyValueUtil.ensureKeyValue(result.getColumnLatestCell(f, q));
+      kv = KeyValueUtil.ensureKeyValue((ExtendedCell) result.getColumnLatestCell(f, q));
       tags = TestCoprocessorForTags.tags;
       assertEquals(5L, Bytes.toLong(kv.getValueArray(), kv.getValueOffset(), kv.getValueLength()));
       assertEquals(2, tags.size());
@@ -515,7 +531,7 @@ public class TestTags {
       TestCoprocessorForTags.checkTagPresence = true;
       scanner = table.getScanner(new Scan().withStartRow(row2));
       result = scanner.next();
-      kv = KeyValueUtil.ensureKeyValue(result.getColumnLatestCell(f, q));
+      kv = KeyValueUtil.ensureKeyValue((ExtendedCell) result.getColumnLatestCell(f, q));
       tags = TestCoprocessorForTags.tags;
       assertEquals(4L, Bytes.toLong(kv.getValueArray(), kv.getValueOffset(), kv.getValueLength()));
       assertEquals(1, tags.size());
@@ -535,7 +551,7 @@ public class TestTags {
       TestCoprocessorForTags.checkTagPresence = true;
       scanner = table.getScanner(new Scan().withStartRow(row3));
       result = scanner.next();
-      kv = KeyValueUtil.ensureKeyValue(result.getColumnLatestCell(f, q));
+      kv = KeyValueUtil.ensureKeyValue((ExtendedCell) result.getColumnLatestCell(f, q));
       tags = TestCoprocessorForTags.tags;
       assertEquals(1, tags.size());
       assertEquals("tag1", Bytes.toString(Tag.cloneValue(tags.get(0))));
@@ -549,7 +565,7 @@ public class TestTags {
       TestCoprocessorForTags.checkTagPresence = true;
       scanner = table.getScanner(new Scan().withStartRow(row3));
       result = scanner.next();
-      kv = KeyValueUtil.ensureKeyValue(result.getColumnLatestCell(f, q));
+      kv = KeyValueUtil.ensureKeyValue((ExtendedCell) result.getColumnLatestCell(f, q));
       tags = TestCoprocessorForTags.tags;
       assertEquals(2, tags.size());
       // We cannot assume the ordering of tags
@@ -573,7 +589,7 @@ public class TestTags {
       TestCoprocessorForTags.checkTagPresence = true;
       scanner = table.getScanner(new Scan().withStartRow(row4));
       result = scanner.next();
-      kv = KeyValueUtil.ensureKeyValue(result.getColumnLatestCell(f, q));
+      kv = KeyValueUtil.ensureKeyValue((ExtendedCell) result.getColumnLatestCell(f, q));
       tags = TestCoprocessorForTags.tags;
       assertEquals(1, tags.size());
       assertEquals("tag2", Bytes.toString(Tag.cloneValue(tags.get(0))));
@@ -639,7 +655,7 @@ public class TestTags {
       if (attribute != null) {
         for (List<? extends Cell> edits : m.getFamilyCellMap().values()) {
           for (Cell cell : edits) {
-            KeyValue kv = KeyValueUtil.ensureKeyValue(cell);
+            KeyValue kv = KeyValueUtil.ensureKeyValue((ExtendedCell) cell);
             if (cf == null) {
               cf = CellUtil.cloneFamily(kv);
             }
@@ -682,9 +698,9 @@ public class TestTags {
         if (results.size() > 0) {
           // Check tag presence in the 1st cell in 1st Result
           Result result = results.get(0);
-          CellScanner cellScanner = result.cellScanner();
+          ExtendedCellScanner cellScanner = result.cellScanner();
           if (cellScanner.advance()) {
-            Cell cell = cellScanner.current();
+            ExtendedCell cell = cellScanner.current();
             tags = PrivateCellUtil.getTags(cell);
           }
         }

@@ -33,6 +33,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.apache.hadoop.conf.Configuration;
@@ -765,11 +767,14 @@ public class AssignmentManager {
    * @param override If false, check RegionState is appropriate for assign; if not throw exception.
    */
   private TransitRegionStateProcedure createAssignProcedure(RegionInfo regionInfo, ServerName sn,
-    boolean override) throws IOException {
+    boolean override, boolean force) throws IOException {
     RegionStateNode regionNode = regionStates.getOrCreateRegionStateNode(regionInfo);
     regionNode.lock();
     try {
       if (override) {
+        if (!force) {
+          preTransitCheck(regionNode, STATES_EXPECTED_ON_ASSIGN);
+        }
         if (regionNode.getProcedure() != null) {
           regionNode.unsetProcedure(regionNode.getProcedure());
         }
@@ -787,7 +792,7 @@ public class AssignmentManager {
   /**
    * Create an assign TransitRegionStateProcedure. Does NO checking of RegionState. Presumes
    * appriopriate state ripe for assign.
-   * @see #createAssignProcedure(RegionInfo, ServerName, boolean)
+   * @see #createAssignProcedure(RegionInfo, ServerName, boolean, boolean)
    */
   private TransitRegionStateProcedure createAssignProcedure(RegionStateNode regionNode,
     ServerName targetServer) {
@@ -801,7 +806,7 @@ public class AssignmentManager {
   }
 
   public long assign(RegionInfo regionInfo, ServerName sn) throws IOException {
-    TransitRegionStateProcedure proc = createAssignProcedure(regionInfo, sn, false);
+    TransitRegionStateProcedure proc = createAssignProcedure(regionInfo, sn, false, false);
     ProcedureSyncWait.submitAndWaitProcedure(master.getMasterProcedureExecutor(), proc);
     return proc.getProcId();
   }
@@ -817,7 +822,7 @@ public class AssignmentManager {
    */
   public Future<byte[]> assignAsync(RegionInfo regionInfo, ServerName sn) throws IOException {
     return ProcedureSyncWait.submitProcedure(master.getMasterProcedureExecutor(),
-      createAssignProcedure(regionInfo, sn, false));
+      createAssignProcedure(regionInfo, sn, false, false));
   }
 
   /**
@@ -961,10 +966,11 @@ public class AssignmentManager {
    * method is called from HBCK2.
    * @return an assign or null
    */
-  public TransitRegionStateProcedure createOneAssignProcedure(RegionInfo ri, boolean override) {
+  public TransitRegionStateProcedure createOneAssignProcedure(RegionInfo ri, boolean override,
+    boolean force) {
     TransitRegionStateProcedure trsp = null;
     try {
-      trsp = createAssignProcedure(ri, null, override);
+      trsp = createAssignProcedure(ri, null, override, force);
     } catch (IOException ioe) {
       LOG.info(
         "Failed {} assign, override={}"
@@ -978,12 +984,16 @@ public class AssignmentManager {
    * Create one TransitRegionStateProcedure to unassign a region. This method is called from HBCK2.
    * @return an unassign or null
    */
-  public TransitRegionStateProcedure createOneUnassignProcedure(RegionInfo ri, boolean override) {
+  public TransitRegionStateProcedure createOneUnassignProcedure(RegionInfo ri, boolean override,
+    boolean force) {
     RegionStateNode regionNode = regionStates.getOrCreateRegionStateNode(ri);
     TransitRegionStateProcedure trsp = null;
     regionNode.lock();
     try {
       if (override) {
+        if (!force) {
+          preTransitCheck(regionNode, STATES_EXPECTED_ON_UNASSIGN_OR_MOVE);
+        }
         if (regionNode.getProcedure() != null) {
           regionNode.unsetProcedure(regionNode.getProcedure());
         }
@@ -1075,15 +1085,90 @@ public class AssignmentManager {
       .toArray(TransitRegionStateProcedure[]::new);
   }
 
+  private int submitUnassignProcedure(TableName tableName,
+    Function<RegionStateNode, Boolean> shouldSubmit, Consumer<RegionStateNode> logRIT,
+    Consumer<TransitRegionStateProcedure> submit) {
+    int inTransitionCount = 0;
+    for (RegionStateNode regionNode : regionStates.getTableRegionStateNodes(tableName)) {
+      regionNode.lock();
+      try {
+        if (shouldSubmit.apply(regionNode)) {
+          if (regionNode.isInTransition()) {
+            logRIT.accept(regionNode);
+            inTransitionCount++;
+            continue;
+          }
+          if (regionNode.isInState(State.OFFLINE, State.CLOSED, State.SPLIT)) {
+            continue;
+          }
+          submit.accept(regionNode.setProcedure(TransitRegionStateProcedure
+            .unassign(getProcedureEnvironment(), regionNode.getRegionInfo())));
+        }
+      } finally {
+        regionNode.unlock();
+      }
+    }
+    return inTransitionCount;
+  }
+
   /**
-   * Called by ModifyTableProcedures to unassign all the excess region replicas for a table.
+   * Called by DsiableTableProcedure to unassign all regions for a table. Will skip submit unassign
+   * procedure if the region is in transition, so you may need to call this method multiple times.
+   * @param tableName the table for closing excess region replicas
+   * @param submit    for submitting procedure
+   * @return the number of regions in transition that we can not schedule unassign procedures
    */
-  public TransitRegionStateProcedure[] createUnassignProceduresForClosingExcessRegionReplicas(
-    TableName tableName, int newReplicaCount) {
-    return regionStates.getTableRegionStateNodes(tableName).stream()
-      .filter(regionNode -> regionNode.getRegionInfo().getReplicaId() >= newReplicaCount)
-      .map(this::forceCreateUnssignProcedure).filter(p -> p != null)
-      .toArray(TransitRegionStateProcedure[]::new);
+  public int submitUnassignProcedureForDisablingTable(TableName tableName,
+    Consumer<TransitRegionStateProcedure> submit) {
+    return submitUnassignProcedure(tableName, rn -> true,
+      rn -> LOG.debug("skip scheduling unassign procedure for {} when closing table regions "
+        + "for disabling since it is in transition", rn),
+      submit);
+  }
+
+  /**
+   * Called by ModifyTableProcedure to unassign all the excess region replicas for a table. Will
+   * skip submit unassign procedure if the region is in transition, so you may need to call this
+   * method multiple times.
+   * @param tableName       the table for closing excess region replicas
+   * @param newReplicaCount the new replica count, should be less than current replica count
+   * @param submit          for submitting procedure
+   * @return the number of regions in transition that we can not schedule unassign procedures
+   */
+  public int submitUnassignProcedureForClosingExcessRegionReplicas(TableName tableName,
+    int newReplicaCount, Consumer<TransitRegionStateProcedure> submit) {
+    return submitUnassignProcedure(tableName,
+      rn -> rn.getRegionInfo().getReplicaId() >= newReplicaCount,
+      rn -> LOG.debug("skip scheduling unassign procedure for {} when closing excess region "
+        + "replicas since it is in transition", rn),
+      submit);
+  }
+
+  private int numberOfUnclosedRegions(TableName tableName,
+    Function<RegionStateNode, Boolean> shouldSubmit) {
+    int unclosed = 0;
+    for (RegionStateNode regionNode : regionStates.getTableRegionStateNodes(tableName)) {
+      regionNode.lock();
+      try {
+        if (shouldSubmit.apply(regionNode)) {
+          if (!regionNode.isInState(State.OFFLINE, State.CLOSED, State.SPLIT)) {
+            unclosed++;
+          }
+        }
+      } finally {
+        regionNode.unlock();
+      }
+    }
+    return unclosed;
+  }
+
+  public int numberOfUnclosedRegionsForDisabling(TableName tableName) {
+    return numberOfUnclosedRegions(tableName, rn -> true);
+  }
+
+  public int numberOfUnclosedExcessRegionReplicas(TableName tableName, int newReplicaCount) {
+    return numberOfUnclosedRegions(tableName,
+      rn -> rn.getRegionInfo().getReplicaId() >= newReplicaCount);
   }
 
   public SplitTableRegionProcedure createSplitProcedure(final RegionInfo regionToSplit,

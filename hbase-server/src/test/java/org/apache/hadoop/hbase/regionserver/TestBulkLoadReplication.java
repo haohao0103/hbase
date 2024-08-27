@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.net.UnknownHostException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -35,9 +36,9 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellBuilder;
-import org.apache.hadoop.hbase.CellBuilderFactory;
 import org.apache.hadoop.hbase.CellBuilderType;
+import org.apache.hadoop.hbase.ExtendedCellBuilder;
+import org.apache.hadoop.hbase.ExtendedCellBuilderFactory;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtil;
 import org.apache.hadoop.hbase.HConstants;
@@ -170,8 +171,9 @@ public class TestBulkLoadReplication extends TestReplicationBase {
     BULK_LOADS_COUNT = new AtomicInteger(0);
   }
 
-  private ReplicationPeerConfig getPeerConfigForCluster(HBaseTestingUtil util) {
-    return ReplicationPeerConfig.newBuilder().setClusterKey(util.getClusterKey())
+  private ReplicationPeerConfig getPeerConfigForCluster(HBaseTestingUtil util)
+    throws UnknownHostException {
+    return ReplicationPeerConfig.newBuilder().setClusterKey(util.getRpcConnnectionURI())
       .setSerial(isSerialPeer()).build();
   }
 
@@ -185,7 +187,7 @@ public class TestBulkLoadReplication extends TestReplicationBase {
             cluster.getConfiguration());
           cp = r.getCoprocessorHost()
             .findCoprocessor(TestBulkLoadReplication.BulkReplicationTestObserver.class);
-          cp.clusterName = cluster.getClusterKey();
+          cp.clusterName = cluster.getRpcConnnectionURI();
         }
       } catch (Exception e) {
         LOG.error(e.getMessage(), e);
@@ -276,7 +278,7 @@ public class TestBulkLoadReplication extends TestReplicationBase {
 
   private String createHFileForFamilies(byte[] row, byte[] value, Configuration clusterConfig)
     throws IOException {
-    CellBuilder cellBuilder = CellBuilderFactory.create(CellBuilderType.DEEP_COPY);
+    ExtendedCellBuilder cellBuilder = ExtendedCellBuilderFactory.create(CellBuilderType.DEEP_COPY);
     cellBuilder.setRow(row).setFamily(TestReplicationBase.famName).setQualifier(Bytes.toBytes("1"))
       .setValue(value).setType(Cell.Type.Put);
 

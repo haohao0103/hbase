@@ -39,6 +39,7 @@ import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.executor.ExecutorService;
 import org.apache.hadoop.hbase.favored.FavoredNodesManager;
 import org.apache.hadoop.hbase.master.assignment.AssignmentManager;
+import org.apache.hadoop.hbase.master.hbck.HbckChore;
 import org.apache.hadoop.hbase.master.janitor.CatalogJanitor;
 import org.apache.hadoop.hbase.master.locking.LockManager;
 import org.apache.hadoop.hbase.master.normalizer.RegionNormalizerManager;
@@ -61,6 +62,7 @@ import org.apache.hadoop.hbase.replication.master.ReplicationLogCleanerBarrier;
 import org.apache.hadoop.hbase.rsgroup.RSGroupInfoManager;
 import org.apache.hadoop.hbase.security.access.AccessChecker;
 import org.apache.hadoop.hbase.security.access.ZKPermissionWatcher;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 
 import org.apache.hbase.thirdparty.com.google.protobuf.Service;
@@ -68,10 +70,12 @@ import org.apache.hbase.thirdparty.com.google.protobuf.Service;
 public class MockNoopMasterServices implements MasterServices {
   private final Configuration conf;
   private final MetricsMaster metricsMaster;
+  private final long masterActiveTime;
 
   public MockNoopMasterServices(final Configuration conf) {
     this.conf = conf;
     this.metricsMaster = new MetricsMaster(new MetricsMasterWrapperImpl(mock(HMaster.class)));
+    this.masterActiveTime = EnvironmentEdgeManager.currentTime();
   }
 
   @Override
@@ -114,6 +118,11 @@ public class MockNoopMasterServices implements MasterServices {
 
   @Override
   public CatalogJanitor getCatalogJanitor() {
+    return null;
+  }
+
+  @Override
+  public HbckChore getHbckChore() {
     return null;
   }
 
@@ -319,6 +328,11 @@ public class MockNoopMasterServices implements MasterServices {
   @Override
   public boolean isActiveMaster() {
     return true;
+  }
+
+  @Override
+  public long getMasterActiveTime() {
+    return masterActiveTime;
   }
 
   @Override

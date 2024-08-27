@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.hbase.mapreduce;
 
-import static org.apache.hadoop.hbase.client.ConnectionFactory.createAsyncConnection;
 import static org.apache.hadoop.hbase.regionserver.HStoreFile.BLOOM_FILTER_TYPE_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -57,6 +56,7 @@ import org.apache.hadoop.hbase.ArrayBackedTag;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.CompatibilitySingletonFactory;
+import org.apache.hadoop.hbase.ExtendedCell;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtil;
@@ -79,6 +79,7 @@ import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
+import org.apache.hadoop.hbase.client.ConnectionRegistry;
 import org.apache.hadoop.hbase.client.ConnectionUtils;
 import org.apache.hadoop.hbase.client.Hbck;
 import org.apache.hadoop.hbase.client.Put;
@@ -518,7 +519,7 @@ public class TestHFileOutputFormat2 {
           HFile.createReader(fs, keyFileStatus.getPath(), new CacheConfig(conf), true, conf);
         HFileScanner scanner = reader.getScanner(conf, false, false, false);
         scanner.seekTo();
-        Cell cell = scanner.getCell();
+        ExtendedCell cell = scanner.getCell();
         List<Tag> tagsFromCell = PrivateCellUtil.getTags(cell);
         assertTrue(tagsFromCell.size() > 0);
         for (Tag tag : tagsFromCell) {
@@ -1668,9 +1669,14 @@ public class TestHFileOutputFormat2 {
     private final Connection delegate;
 
     public ConfigurationCaptorConnection(Configuration conf, ExecutorService es, User user,
-      Map<String, byte[]> connectionAttributes) throws IOException {
+      ConnectionRegistry registry, Map<String, byte[]> connectionAttributes) throws IOException {
+      // here we do not use this registry, so close it...
+      registry.close();
+      // here we use createAsyncConnection, to avoid infinite recursive as we reset the Connection
+      // implementation in below method
       delegate =
-        FutureUtils.get(createAsyncConnection(conf, user, connectionAttributes)).toConnection();
+        FutureUtils.get(ConnectionFactory.createAsyncConnection(conf, user, connectionAttributes))
+          .toConnection();
 
       final String uuid = conf.get(UUID_KEY);
       if (uuid != null) {

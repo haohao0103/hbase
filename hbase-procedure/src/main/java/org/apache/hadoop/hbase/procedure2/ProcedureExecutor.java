@@ -326,10 +326,11 @@ public class ProcedureExecutor<TEnvironment> {
   }
 
   private void load(final boolean abortOnCorruption) throws IOException {
-    Preconditions.checkArgument(completed.isEmpty(), "completed not empty");
-    Preconditions.checkArgument(rollbackStack.isEmpty(), "rollback state not empty");
-    Preconditions.checkArgument(procedures.isEmpty(), "procedure map not empty");
-    Preconditions.checkArgument(scheduler.size() == 0, "run queue not empty");
+    Preconditions.checkArgument(completed.isEmpty(), "completed not empty: %s", completed);
+    Preconditions.checkArgument(rollbackStack.isEmpty(), "rollback state not empty: %s",
+      rollbackStack);
+    Preconditions.checkArgument(procedures.isEmpty(), "procedure map not empty: %s", procedures);
+    Preconditions.checkArgument(scheduler.size() == 0, "scheduler queue not empty: %s", scheduler);
 
     store.load(new ProcedureStore.ProcedureLoader() {
       @Override
@@ -495,6 +496,28 @@ public class ProcedureExecutor<TEnvironment> {
   private void pushProceduresAfterLoad(List<Procedure<TEnvironment>> runnableList,
     List<Procedure<TEnvironment>> failedList) {
     failedList.forEach(scheduler::addBack);
+    // Put the procedures which have been executed first
+    // For table procedures, to prevent concurrent modifications, we only allow one procedure to run
+    // for a single table at the same time, this is done via inserting a waiting queue before
+    // actually add the procedure to run queue. So when loading here, we should add the procedures
+    // which have been executed first, otherwise another procedure which was in the waiting queue
+    // before restarting may be added to run queue first and still cause concurrent modifications.
+    // See HBASE-28263 for the reason why we need this
+    runnableList.sort((p1, p2) -> {
+      if (p1.wasExecuted()) {
+        if (p2.wasExecuted()) {
+          return Long.compare(p1.getProcId(), p2.getProcId());
+        } else {
+          return -1;
+        }
+      } else {
+        if (p2.wasExecuted()) {
+          return 1;
+        } else {
+          return Long.compare(p1.getProcId(), p2.getProcId());
+        }
+      }
+    });
     runnableList.forEach(p -> {
       p.afterReplay(getEnvironment());
       if (!p.hasParent()) {
@@ -734,14 +757,11 @@ public class ProcedureExecutor<TEnvironment> {
       Thread.currentThread().interrupt();
     }
 
-    // Destroy the Thread Group for the executors
-    // TODO: Fix. #join is not place to destroy resources.
-    try {
-      threadGroup.destroy();
-    } catch (IllegalThreadStateException e) {
-      LOG.error("ThreadGroup {} contains running threads; {}: See STDOUT", this.threadGroup, e);
-      // This dumps list of threads on STDOUT.
-      this.threadGroup.list();
+    // log the still active threads, ThreadGroup.destroy is deprecated in JDK17 and it is not
+    // necessary for us to must destroy it here, so we just do a check and log
+    if (threadGroup.activeCount() > 0) {
+      LOG.error("There are still active thread in group {}, see STDOUT", threadGroup);
+      threadGroup.list();
     }
 
     // reset the in-memory state for testing

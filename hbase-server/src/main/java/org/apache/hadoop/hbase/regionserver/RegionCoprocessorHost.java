@@ -65,6 +65,9 @@ import org.apache.hadoop.hbase.io.FSDataInputStreamWrapper;
 import org.apache.hadoop.hbase.io.Reference;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.metrics.MetricRegistry;
+import org.apache.hadoop.hbase.quotas.OperationQuota;
+import org.apache.hadoop.hbase.quotas.RpcQuotaManager;
+import org.apache.hadoop.hbase.quotas.RpcThrottlingException;
 import org.apache.hadoop.hbase.regionserver.Region.Operation;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionLifeCycleTracker;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequest;
@@ -82,6 +85,9 @@ import org.apache.hbase.thirdparty.com.google.protobuf.Message;
 import org.apache.hbase.thirdparty.com.google.protobuf.Service;
 import org.apache.hbase.thirdparty.org.apache.commons.collections4.map.AbstractReferenceMap;
 import org.apache.hbase.thirdparty.org.apache.commons.collections4.map.ReferenceMap;
+
+import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
 
 /**
  * Implements the coprocessor environment and runtime support for coprocessors loaded within a
@@ -116,6 +122,7 @@ public class RegionCoprocessorHost
     ConcurrentMap<String, Object> sharedData;
     private final MetricRegistry metricRegistry;
     private final RegionServerServices services;
+    private final RpcQuotaManager rpcQuotaManager;
 
     /**
      * Constructor
@@ -131,6 +138,13 @@ public class RegionCoprocessorHost
       this.services = services;
       this.metricRegistry =
         MetricsCoprocessor.createRegistryForRegionCoprocessor(impl.getClass().getName());
+      // Some unit tests reach this line with services == null, and are okay with rpcQuotaManager
+      // being null. Let these unit tests succeed. This should not happen in real usage.
+      if (services != null) {
+        this.rpcQuotaManager = services.getRegionServerRpcQuotaManager();
+      } else {
+        this.rpcQuotaManager = null;
+      }
     }
 
     /** Returns the region */
@@ -185,6 +199,35 @@ public class RegionCoprocessorHost
     public RawCellBuilder getCellBuilder() {
       // We always do a DEEP_COPY only
       return RawCellBuilderFactory.create();
+    }
+
+    @Override
+    public RpcQuotaManager getRpcQuotaManager() {
+      return rpcQuotaManager;
+    }
+
+    @Override
+    public OperationQuota checkScanQuota(Scan scan, long maxBlockBytesScanned,
+      long prevBlockBytesScannedDifference) throws IOException, RpcThrottlingException {
+      ClientProtos.ScanRequest scanRequest = RequestConverter
+        .buildScanRequest(region.getRegionInfo().getRegionName(), scan, scan.getCaching(), false);
+      long maxScannerResultSize =
+        services.getConfiguration().getLong(HConstants.HBASE_SERVER_SCANNER_MAX_RESULT_SIZE_KEY,
+          HConstants.DEFAULT_HBASE_SERVER_SCANNER_MAX_RESULT_SIZE);
+      return rpcQuotaManager.checkScanQuota(region, scanRequest, maxScannerResultSize,
+        maxBlockBytesScanned, prevBlockBytesScannedDifference);
+    }
+
+    @Override
+    public OperationQuota checkBatchQuota(Region region, OperationQuota.OperationType type)
+      throws IOException, RpcThrottlingException {
+      return rpcQuotaManager.checkBatchQuota(region, type);
+    }
+
+    @Override
+    public OperationQuota checkBatchQuota(final Region region, int numWrites, int numReads)
+      throws IOException, RpcThrottlingException {
+      return rpcQuotaManager.checkBatchQuota(region, numWrites, numReads);
     }
   }
 
@@ -909,8 +952,9 @@ public class RegionCoprocessorHost
    * @param get      - the get that could be used Note that the get only does not specify the family
    *                 and qualifier that should be used
    * @return true if default processing should be bypassed
-   * @deprecated In hbase-2.0.0. Will be removed in hbase-3.0.0. Added explicitly for a single
-   *             Coprocessor for its needs only. Will be removed.
+   * @deprecated In hbase-2.0.0. Will be removed in hbase-4.0.0. Added explicitly for a single
+   *             Coprocessor for its needs only. Will be removed. VisibilityController still needs
+   *             this, need to change the logic there first.
    */
   @Deprecated
   public boolean prePrepareTimeStampForDeleteVersion(final Mutation mutation, final Cell kv,
@@ -1382,39 +1426,6 @@ public class RegionCoprocessorHost
       @Override
       public void call(RegionObserver observer) throws IOException {
         observer.postReplayWALs(this, info, edits);
-      }
-    });
-  }
-
-  /**
-   * Supports Coprocessor 'bypass'.
-   * @return true if default behavior should be bypassed, false otherwise
-   * @deprecated Since hbase-2.0.0. No replacement. To be removed in hbase-3.0.0 and replaced with
-   *             something that doesn't expose IntefaceAudience.Private classes.
-   */
-  @Deprecated
-  public boolean preWALRestore(final RegionInfo info, final WALKey logKey, final WALEdit logEdit)
-    throws IOException {
-    return execOperation(
-      coprocEnvironments.isEmpty() ? null : new RegionObserverOperationWithoutResult(true) {
-        @Override
-        public void call(RegionObserver observer) throws IOException {
-          observer.preWALRestore(this, info, logKey, logEdit);
-        }
-      });
-  }
-
-  /**
-   * @deprecated Since hbase-2.0.0. No replacement. To be removed in hbase-3.0.0 and replaced with
-   *             something that doesn't expose IntefaceAudience.Private classes.
-   */
-  @Deprecated
-  public void postWALRestore(final RegionInfo info, final WALKey logKey, final WALEdit logEdit)
-    throws IOException {
-    execOperation(coprocEnvironments.isEmpty() ? null : new RegionObserverOperationWithoutResult() {
-      @Override
-      public void call(RegionObserver observer) throws IOException {
-        observer.postWALRestore(this, info, logKey, logEdit);
       }
     });
   }

@@ -42,6 +42,7 @@ import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.ExtendedCell;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.TableName;
@@ -490,7 +491,7 @@ public class HRegionFileSystem {
 
     String name = buildPath.getName();
     if (generateNewName) {
-      name = generateUniqueName((seqNum < 0) ? null : "_SeqId_" + seqNum + "_");
+      name = generateUniqueName((seqNum < 0) ? null : StoreFileInfo.formatBulkloadSeqId(seqNum));
     }
     Path dstPath = new Path(storeDir, name);
     if (!fs.exists(buildPath)) {
@@ -693,8 +694,8 @@ public class HRegionFileSystem {
       f.initReader();
       try {
         Cell splitKey = PrivateCellUtil.createFirstOnRow(splitRow);
-        Optional<Cell> lastKey = f.getLastKey();
-        Optional<Cell> firstKey = f.getFirstKey();
+        Optional<ExtendedCell> lastKey = f.getLastKey();
+        Optional<ExtendedCell> firstKey = f.getFirstKey();
         if (top) {
           // check if larger than last key.
           // If lastKey is null means storefile is empty.

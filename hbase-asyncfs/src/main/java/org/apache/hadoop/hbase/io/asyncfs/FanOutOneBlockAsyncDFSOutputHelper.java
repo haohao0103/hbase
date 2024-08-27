@@ -30,7 +30,6 @@ import static org.apache.hadoop.hdfs.protocol.datatransfer.BlockConstructionStag
 import static org.apache.hbase.thirdparty.io.netty.channel.ChannelOption.CONNECT_TIMEOUT_MILLIS;
 import static org.apache.hbase.thirdparty.io.netty.handler.timeout.IdleState.READER_IDLE;
 
-import com.google.protobuf.CodedOutputStream;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.lang.reflect.InvocationTargetException;
@@ -92,6 +91,7 @@ import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.hbase.thirdparty.com.google.protobuf.CodedOutputStream;
 import org.apache.hbase.thirdparty.io.netty.bootstrap.Bootstrap;
 import org.apache.hbase.thirdparty.io.netty.buffer.ByteBuf;
 import org.apache.hbase.thirdparty.io.netty.buffer.ByteBufAllocator;
@@ -351,7 +351,7 @@ public final class FanOutOneBlockAsyncDFSOutputHelper {
       writeBlockProtoBuilder.setStorageType(PBHelperClient.convertStorageType(storageType)).build();
     int protoLen = proto.getSerializedSize();
     ByteBuf buffer =
-      channel.alloc().buffer(3 + CodedOutputStream.computeRawVarint32Size(protoLen) + protoLen);
+      channel.alloc().buffer(3 + CodedOutputStream.computeUInt32SizeNoTag(protoLen) + protoLen);
     buffer.writeShort(DataTransferProtocol.DATA_TRANSFER_VERSION);
     buffer.writeByte(Op.WRITE_BLOCK.code);
     proto.writeDelimitedTo(new ByteBufOutputStream(buffer));
@@ -445,11 +445,15 @@ public final class FanOutOneBlockAsyncDFSOutputHelper {
     }
   }
 
-  private static EnumSetWritable<CreateFlag> getCreateFlags(boolean overwrite) {
+  private static EnumSetWritable<CreateFlag> getCreateFlags(boolean overwrite,
+    boolean noLocalWrite) {
     List<CreateFlag> flags = new ArrayList<>();
     flags.add(CreateFlag.CREATE);
     if (overwrite) {
       flags.add(CreateFlag.OVERWRITE);
+    }
+    if (noLocalWrite) {
+      flags.add(CreateFlag.NO_LOCAL_WRITE);
     }
     flags.add(CreateFlag.SHOULD_REPLICATE);
     return new EnumSetWritable<>(EnumSet.copyOf(flags));
@@ -457,8 +461,8 @@ public final class FanOutOneBlockAsyncDFSOutputHelper {
 
   private static FanOutOneBlockAsyncDFSOutput createOutput(DistributedFileSystem dfs, String src,
     boolean overwrite, boolean createParent, short replication, long blockSize,
-    EventLoopGroup eventLoopGroup, Class<? extends Channel> channelClass, StreamSlowMonitor monitor)
-    throws IOException {
+    EventLoopGroup eventLoopGroup, Class<? extends Channel> channelClass, StreamSlowMonitor monitor,
+    boolean noLocalWrite) throws IOException {
     Configuration conf = dfs.getConf();
     DFSClient client = dfs.getClient();
     String clientName = client.getClientName();
@@ -475,7 +479,7 @@ public final class FanOutOneBlockAsyncDFSOutputHelper {
       try {
         stat = FILE_CREATOR.create(namenode, src,
           FsPermission.getFileDefault().applyUMask(FsPermission.getUMask(conf)), clientName,
-          getCreateFlags(overwrite), createParent, replication, blockSize,
+          getCreateFlags(overwrite, noLocalWrite), createParent, replication, blockSize,
           CryptoProtocolVersion.supported());
       } catch (Exception e) {
         if (e instanceof RemoteException) {
@@ -561,14 +565,14 @@ public final class FanOutOneBlockAsyncDFSOutputHelper {
   public static FanOutOneBlockAsyncDFSOutput createOutput(DistributedFileSystem dfs, Path f,
     boolean overwrite, boolean createParent, short replication, long blockSize,
     EventLoopGroup eventLoopGroup, Class<? extends Channel> channelClass,
-    final StreamSlowMonitor monitor) throws IOException {
+    final StreamSlowMonitor monitor, boolean noLocalWrite) throws IOException {
     return new FileSystemLinkResolver<FanOutOneBlockAsyncDFSOutput>() {
 
       @Override
       public FanOutOneBlockAsyncDFSOutput doCall(Path p)
         throws IOException, UnresolvedLinkException {
         return createOutput(dfs, p.toUri().getPath(), overwrite, createParent, replication,
-          blockSize, eventLoopGroup, channelClass, monitor);
+          blockSize, eventLoopGroup, channelClass, monitor, noLocalWrite);
       }
 
       @Override
