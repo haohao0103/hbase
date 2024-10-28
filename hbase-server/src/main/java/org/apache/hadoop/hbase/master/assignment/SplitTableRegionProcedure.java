@@ -57,6 +57,7 @@ import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureUtil;
 import org.apache.hadoop.hbase.procedure2.ProcedureMetrics;
 import org.apache.hadoop.hbase.procedure2.ProcedureStateSerializer;
+import org.apache.hadoop.hbase.quotas.MasterQuotaManager;
 import org.apache.hadoop.hbase.quotas.QuotaExceededException;
 import org.apache.hadoop.hbase.regionserver.HRegionFileSystem;
 import org.apache.hadoop.hbase.regionserver.HStore;
@@ -547,16 +548,18 @@ public class SplitTableRegionProcedure
       return false;
     }
 
-    // Mostly this check is not used because we already check the switch before submit a split
-    // procedure. Just for safe, check the switch again. This procedure can be rollbacked if
-    // the switch was set to false after submit.
+    // Mostly the below two checks are not used because we already check the switches before
+    // submitting the split procedure. Just for safety, we are checking the switch again here.
+    // Also, in case the switch was set to false after submission, this procedure can be rollbacked,
+    // thanks to this double check!
+    // case 1: check for cluster level switch
     if (!env.getMasterServices().isSplitOrMergeEnabled(MasterSwitchType.SPLIT)) {
       LOG.warn("pid=" + getProcId() + " split switch is off! skip split of " + parentHRI);
       setFailure(new IOException(
         "Split region " + parentHRI.getRegionNameAsString() + " failed due to split switch off"));
       return false;
     }
-
+    // case 2: check for table level switch
     if (!env.getMasterServices().getTableDescriptors().get(getTableName()).isSplitEnabled()) {
       LOG.warn("pid={}, split is disabled for the table! Skipping split of {}", getProcId(),
         parentHRI);
@@ -599,7 +602,10 @@ public class SplitTableRegionProcedure
     // TODO: Clean up split and merge. Currently all over the place.
     // Notify QuotaManager and RegionNormalizer
     try {
-      env.getMasterServices().getMasterQuotaManager().onRegionSplit(this.getParentRegion());
+      MasterQuotaManager masterQuotaManager = env.getMasterServices().getMasterQuotaManager();
+      if (masterQuotaManager != null) {
+        masterQuotaManager.onRegionSplit(this.getParentRegion());
+      }
     } catch (QuotaExceededException e) {
       // TODO: why is this here? split requests can be submitted by actors other than the normalizer
       env.getMasterServices().getRegionNormalizerManager()

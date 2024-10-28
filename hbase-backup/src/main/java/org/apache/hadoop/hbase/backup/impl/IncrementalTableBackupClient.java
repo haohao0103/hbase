@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -32,15 +33,20 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.backup.BackupCopyJob;
+import org.apache.hadoop.hbase.backup.BackupInfo;
 import org.apache.hadoop.hbase.backup.BackupInfo.BackupPhase;
 import org.apache.hadoop.hbase.backup.BackupRequest;
 import org.apache.hadoop.hbase.backup.BackupRestoreFactory;
 import org.apache.hadoop.hbase.backup.BackupType;
+import org.apache.hadoop.hbase.backup.HBackupFileSystem;
 import org.apache.hadoop.hbase.backup.mapreduce.MapReduceBackupCopyJob;
 import org.apache.hadoop.hbase.backup.util.BackupUtils;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.mapreduce.WALPlayer;
+import org.apache.hadoop.hbase.snapshot.SnapshotDescriptionUtils;
+import org.apache.hadoop.hbase.snapshot.SnapshotManifest;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CommonFSUtils;
 import org.apache.hadoop.hbase.util.HFileArchiveUtil;
@@ -50,6 +56,8 @@ import org.apache.hadoop.util.Tool;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos;
 
 /**
  * Incremental backup implementation. See the {@link #execute() execute} method.
@@ -103,13 +111,14 @@ public class IncrementalTableBackupClient extends TableBackupClient {
 
   /*
    * Reads bulk load records from backup table, iterates through the records and forms the paths for
-   * bulk loaded hfiles. Copies the bulk loaded hfiles to backup destination
+   * bulk loaded hfiles. Copies the bulk loaded hfiles to backup destination. This method does NOT
+   * clean up the entries in the bulk load system table. Those entries should not be cleaned until
+   * the backup is marked as complete.
    * @param sTableList list of tables to be backed up
-   * @return map of table to List of files
+   * @return the rowkeys of bulk loaded files
    */
   @SuppressWarnings("unchecked")
-  protected Map<byte[], List<Path>>[] handleBulkLoad(List<TableName> sTableList)
-    throws IOException {
+  protected List<byte[]> handleBulkLoad(List<TableName> sTableList) throws IOException {
     Map<byte[], List<Path>>[] mapForSrc = new Map[sTableList.size()];
     List<String> activeFiles = new ArrayList<>();
     List<String> archiveFiles = new ArrayList<>();
@@ -191,8 +200,8 @@ public class IncrementalTableBackupClient extends TableBackupClient {
     }
 
     copyBulkLoadedFiles(activeFiles, archiveFiles);
-    backupManager.deleteBulkLoadedRows(pair.getSecond());
-    return mapForSrc;
+
+    return pair.getSecond();
   }
 
   private void copyBulkLoadedFiles(List<String> activeFiles, List<String> archiveFiles)
@@ -259,8 +268,11 @@ public class IncrementalTableBackupClient extends TableBackupClient {
   }
 
   @Override
-  public void execute() throws IOException {
+  public void execute() throws IOException, ColumnFamilyMismatchException {
     try {
+      Map<TableName, String> tablesToFullBackupIds = getFullBackupIds();
+      verifyCfCompatibility(backupInfo.getTables(), tablesToFullBackupIds);
+
       // case PREPARE_INCREMENTAL:
       beginBackup(backupManager, backupInfo);
       backupInfo.setPhase(BackupPhase.PREPARE_INCREMENTAL);
@@ -308,10 +320,12 @@ public class IncrementalTableBackupClient extends TableBackupClient {
         BackupUtils.getMinValue(BackupUtils.getRSLogTimestampMins(newTableSetTimestampMap));
       backupManager.writeBackupStartCode(newStartCode);
 
-      handleBulkLoad(backupInfo.getTableNames());
+      List<byte[]> bulkLoadedRows = handleBulkLoad(backupInfo.getTableNames());
+
       // backup complete
       completeBackup(conn, backupInfo, BackupType.INCREMENTAL, conf);
 
+      backupManager.deleteBulkLoadedRows(bulkLoadedRows);
     } catch (IOException e) {
       failBackup(conn, backupInfo, backupManager, e, "Unexpected Exception : ",
         BackupType.INCREMENTAL, conf);
@@ -430,5 +444,87 @@ public class IncrementalTableBackupClient extends TableBackupClient {
     path = new Path(path, ".tmp");
     path = new Path(path, backupId);
     return path;
+  }
+
+  private Map<TableName, String> getFullBackupIds() throws IOException {
+    // Ancestors are stored from newest to oldest, so we can iterate backwards
+    // in order to populate our backupId map with the most recent full backup
+    // for a given table
+    List<BackupManifest.BackupImage> images = getAncestors(backupInfo);
+    Map<TableName, String> results = new HashMap<>();
+    for (int i = images.size() - 1; i >= 0; i--) {
+      BackupManifest.BackupImage image = images.get(i);
+      if (image.getType() != BackupType.FULL) {
+        continue;
+      }
+
+      for (TableName tn : image.getTableNames()) {
+        results.put(tn, image.getBackupId());
+      }
+    }
+    return results;
+  }
+
+  /**
+   * Verifies that the current table descriptor CFs matches the descriptor CFs of the last full
+   * backup for the tables. This ensures CF compatibility across incremental backups. If a mismatch
+   * is detected, a full table backup should be taken, rather than an incremental one
+   */
+  private void verifyCfCompatibility(Set<TableName> tables,
+    Map<TableName, String> tablesToFullBackupId) throws IOException, ColumnFamilyMismatchException {
+    ColumnFamilyMismatchException.ColumnFamilyMismatchExceptionBuilder exBuilder =
+      ColumnFamilyMismatchException.newBuilder();
+    try (Admin admin = conn.getAdmin(); BackupAdminImpl backupAdmin = new BackupAdminImpl(conn)) {
+      for (TableName tn : tables) {
+        String backupId = tablesToFullBackupId.get(tn);
+        BackupInfo fullBackupInfo = backupAdmin.getBackupInfo(backupId);
+
+        ColumnFamilyDescriptor[] currentCfs = admin.getDescriptor(tn).getColumnFamilies();
+        String snapshotName = fullBackupInfo.getSnapshotName(tn);
+        Path root = HBackupFileSystem.getTableBackupPath(tn,
+          new Path(fullBackupInfo.getBackupRootDir()), fullBackupInfo.getBackupId());
+        Path manifestDir = SnapshotDescriptionUtils.getCompletedSnapshotDir(snapshotName, root);
+
+        FileSystem fs;
+        try {
+          fs = FileSystem.get(new URI(fullBackupInfo.getBackupRootDir()), conf);
+        } catch (URISyntaxException e) {
+          throw new IOException("Unable to get fs", e);
+        }
+
+        SnapshotProtos.SnapshotDescription snapshotDescription =
+          SnapshotDescriptionUtils.readSnapshotInfo(fs, manifestDir);
+        SnapshotManifest manifest =
+          SnapshotManifest.open(conf, fs, manifestDir, snapshotDescription);
+
+        ColumnFamilyDescriptor[] backupCfs = manifest.getTableDescriptor().getColumnFamilies();
+        if (!areCfsCompatible(currentCfs, backupCfs)) {
+          exBuilder.addMismatchedTable(tn, currentCfs, backupCfs);
+        }
+      }
+    }
+
+    ColumnFamilyMismatchException ex = exBuilder.build();
+    if (!ex.getMismatchedTables().isEmpty()) {
+      throw ex;
+    }
+  }
+
+  private static boolean areCfsCompatible(ColumnFamilyDescriptor[] currentCfs,
+    ColumnFamilyDescriptor[] backupCfs) {
+    if (currentCfs.length != backupCfs.length) {
+      return false;
+    }
+
+    for (int i = 0; i < backupCfs.length; i++) {
+      String currentCf = currentCfs[i].getNameAsString();
+      String backupCf = backupCfs[i].getNameAsString();
+
+      if (!currentCf.equals(backupCf)) {
+        return false;
+      }
+    }
+
+    return true;
   }
 }
