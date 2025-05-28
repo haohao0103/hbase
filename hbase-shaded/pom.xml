@@ -81,6 +81,13 @@
           </configuration>
         </plugin>
         <plugin>
+          <!--Disable source plugin for shaded modules-->
+          <artifactId>maven-source-plugin</artifactId>
+          <configuration>
+            <skipSource>true</skipSource>
+          </configuration>
+        </plugin>
+        <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-shade-plugin</artifactId>
           <version>3.5.1</version>
@@ -125,6 +132,7 @@
                     <exclude>commons-logging:*</exclude>
                     <exclude>org.javassist:*</exclude>
                     <exclude>io.opentelemetry:*</exclude>
+                    <exclude>io.opentelemetry.semconv:*</exclude>
                   </excludes>
                 </artifactSet>
                 <relocations>
